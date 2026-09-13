@@ -3,7 +3,16 @@ use crate::models::*;
 use crate::storage;
 use chrono::Utc;
 
-const AGENT_PROXY_URL: &str = "http://127.0.0.1:9099";
+const DEFAULT_AGENT_PROXY_URL: &str = "http://127.0.0.1:9099";
+
+fn get_proxy_url() -> String {
+    let config = storage::read_config();
+    if config.agent_proxy_url.is_empty() {
+        DEFAULT_AGENT_PROXY_URL.to_string()
+    } else {
+        config.agent_proxy_url
+    }
+}
 
 // ===== 项目命令 =====
 
@@ -19,6 +28,8 @@ pub fn create_project(name: String, desc: String) -> Project {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         description: desc,
+        icon: String::new(),
+        color: "#1677ff".to_string(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -71,7 +82,7 @@ pub fn list_agents(project_id: String) -> Vec<Agent> {
 /// agent-proxy 没起时不报错,返回空列表。
 #[tauri::command]
 pub fn discover_local_agents() -> Vec<LocalAgentInfo> {
-    let url = format!("{}/v1/cli-agents", AGENT_PROXY_URL);
+    let url = format!("{}/v1/cli-agents", get_proxy_url());
     let agent = ureq::AgentBuilder::new()
         .timeout_read(std::time::Duration::from_millis(1500))
         .timeout_connect(std::time::Duration::from_millis(500))
@@ -220,6 +231,9 @@ pub fn create_task(project_id: String, title: String, desc: String, parent_id: O
         description: desc,
         status: "todo".to_string(),
         priority: 0,
+        start_date: None,
+        due_date: None,
+        milestone: false,
         assigned_agent_id: None,
         assigned_agent_name: None,
         children: Vec::new(),
@@ -227,6 +241,9 @@ pub fn create_task(project_id: String, title: String, desc: String, parent_id: O
         agent_output: None,
         waiting_for_input: None,
         receipts: None,
+        custom_fields: serde_json::json!({}),
+        tags: Vec::new(),
+        sort_order: 0,
         created_at: now.clone(),
         updated_at: now,
         completed_at: None,
@@ -573,5 +590,131 @@ pub fn get_config() -> AppConfig {
 #[tauri::command]
 pub fn save_config(config: AppConfig) -> Result<(), String> {
     storage::write_config(&config);
+    Ok(())
+}
+
+// ===== 任务更新 =====
+
+#[tauri::command]
+pub fn update_task(task_id: String, params: UpdateTaskParams) -> Result<Task, String> {
+    let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
+    let now = Utc::now().to_rfc3339();
+
+    if let Some(title) = params.title { task.title = title; }
+    if let Some(desc) = params.description { task.description = desc; }
+    if let Some(status) = params.status { task.status = status; }
+    if let Some(priority) = params.priority { task.priority = priority; }
+    if let Some(start_date) = params.start_date { task.start_date = Some(start_date); }
+    if let Some(due_date) = params.due_date { task.due_date = Some(due_date); }
+    if let Some(milestone) = params.milestone { task.milestone = milestone; }
+    if let Some(agent_id) = params.assigned_agent_id { task.assigned_agent_id = Some(agent_id); }
+    if let Some(tags) = params.tags { task.tags = tags; }
+    if let Some(sort_order) = params.sort_order { task.sort_order = sort_order; }
+    if let Some(cf) = params.custom_fields { task.custom_fields = cf; }
+
+    task.updated_at = now;
+    storage::save_task(&task);
+    Ok(task)
+}
+
+#[tauri::command]
+pub fn batch_update_tasks(task_ids: Vec<String>, status: Option<String>, priority: Option<i32>, tags: Option<Vec<String>>) -> Result<i32, String> {
+    let mut count = 0;
+    for tid in &task_ids {
+        if let Some(mut task) = storage::find_task(tid) {
+            let now = Utc::now().to_rfc3339();
+            if let Some(ref s) = status { task.status = s.clone(); }
+            if let Some(p) = priority { task.priority = p; }
+            if let Some(ref t) = tags { task.tags = t.clone(); }
+            task.updated_at = now;
+            storage::save_task(&task);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+// ===== 标签命令 =====
+
+#[tauri::command]
+pub fn list_tags(project_id: String) -> Vec<Tag> {
+    storage::read_tags_by_project(&project_id)
+}
+
+#[tauri::command]
+pub fn create_tag(project_id: String, name: String, color: String) -> Tag {
+    let tag = Tag {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id,
+        name,
+        color,
+    };
+    storage::save_tag(&tag);
+    tag
+}
+
+#[tauri::command]
+pub fn delete_tag(id: String) -> Result<(), String> {
+    storage::remove_tag(&id);
+    Ok(())
+}
+
+// ===== 任务依赖命令 =====
+
+#[tauri::command]
+pub fn get_task_dependencies(task_id: String) -> Vec<String> {
+    storage::get_task_dependencies(&task_id)
+}
+
+#[tauri::command]
+pub fn set_task_dependencies(task_id: String, depends_on: Vec<String>) -> Result<(), String> {
+    // 循环依赖检测
+    for dep_id in &depends_on {
+        if dep_id == &task_id {
+            return Err("不能依赖自己".to_string());
+        }
+    }
+    storage::set_task_dependencies(&task_id, &depends_on);
+    Ok(())
+}
+
+// ===== 文档命令 =====
+
+#[tauri::command]
+pub fn list_documents(project_id: String) -> Vec<ProjectDocument> {
+    storage::read_documents_by_project(&project_id)
+}
+
+#[tauri::command]
+pub fn create_document(project_id: String, title: String, content: String) -> ProjectDocument {
+    let now = Utc::now().to_rfc3339();
+    let doc = ProjectDocument {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id,
+        title,
+        content,
+        parent_id: None,
+        sort_order: 0,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    storage::save_document(&doc);
+    doc
+}
+
+#[tauri::command]
+pub fn update_document(doc_id: String, title: Option<String>, content: Option<String>) -> Result<ProjectDocument, String> {
+    let mut doc = storage::find_document(&doc_id).ok_or("文档不存在")?;
+    let now = Utc::now().to_rfc3339();
+    if let Some(t) = title { doc.title = t; }
+    if let Some(c) = content { doc.content = c; }
+    doc.updated_at = now;
+    storage::save_document(&doc);
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn delete_document(doc_id: String) -> Result<(), String> {
+    storage::remove_document(&doc_id);
     Ok(())
 }

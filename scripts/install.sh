@@ -23,9 +23,9 @@ set -euo pipefail
 # =============== 配置 ===============
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_NAME="z-biz-tool-agent-worker"           # .app bundle 名称 (来自 tauri.conf.json productName)
-BUNDLE_ID="com.zifang.z-biz-tool-agent-worker"  # bundle identifier
-DISPLAY_NAME="z-biz-tool-agent-worker"
+APP_NAME="z-biz-tool-worker"           # .app bundle 名称 (来自 tauri.conf.json productName)
+BUNDLE_ID="com.zifang.z-biz-tool-worker"  # bundle identifier
+DISPLAY_NAME="z-biz-tool-worker"
 
 # 颜色
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'

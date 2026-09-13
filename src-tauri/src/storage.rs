@@ -1,217 +1,130 @@
-use std::fs;
-use std::path::PathBuf;
-use serde_json;
+// storage.rs — SQLite-backed storage layer.
+// Provides the same public API as before but delegates to db::Database.
+// A global `Database` instance is initialized on first access via `get_db()`.
+
+use std::sync::OnceLock;
+use crate::db::{self, Database};
 use crate::models::*;
 
-const DATA_DIR_NAME: &str = ".z-agent-worker";
+static DB: OnceLock<Database> = OnceLock::new();
 
-fn data_dir() -> PathBuf {
-    let home = dirs::home_dir().expect("无法获取用户主目录");
-    home.join(DATA_DIR_NAME)
+pub fn get_db() -> &'static Database {
+    DB.get_or_init(|| {
+        let db = Database::new().expect("failed to initialize SQLite database");
+        db.migrate_from_json();
+        db
+    })
 }
 
-fn projects_file() -> PathBuf {
-    data_dir().join("projects.json")
-}
-
-fn agents_file() -> PathBuf {
-    data_dir().join("agents.json")
-}
-
-fn tasks_file() -> PathBuf {
-    data_dir().join("tasks.json")
-}
-
-fn config_file() -> PathBuf {
-    data_dir().join("config.json")
-}
-
-fn messages_dir() -> PathBuf {
-    data_dir().join("messages")
-}
-
-fn task_messages_file(task_id: &str) -> PathBuf {
-    messages_dir().join(format!("{}.json", task_id))
-}
-
-/// 确保数据目录存在
-pub fn ensure_data_dir() {
-    let dir = data_dir();
-    if !dir.exists() {
-        fs::create_dir_all(&dir).expect("无法创建数据目录");
-    }
-    let msg_dir = messages_dir();
-    if !msg_dir.exists() {
-        fs::create_dir_all(&msg_dir).expect("无法创建消息目录");
-    }
-}
-
-// ===== 项目存储 =====
+// ===== 项目 =====
 pub fn read_projects() -> Vec<Project> {
-    let file = projects_file();
-    if !file.exists() {
-        return Vec::new();
-    }
-    match fs::read_to_string(&file) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
-pub fn write_projects(projects: &[Project]) {
-    ensure_data_dir();
-    let content = serde_json::to_string_pretty(&projects).expect("序列化项目失败");
-    fs::write(projects_file(), content).expect("写入项目文件失败");
+    db::read_projects(get_db())
 }
 
 pub fn save_project(project: &Project) {
-    let mut projects = read_projects();
-    if let Some(idx) = projects.iter().position(|p| p.id == project.id) {
-        projects[idx] = project.clone();
-    } else {
-        projects.push(project.clone());
-    }
-    write_projects(&projects);
+    db::save_project(get_db(), project);
 }
 
 pub fn remove_project(id: &str) {
-    let projects = read_projects();
-    let filtered: Vec<Project> = projects.into_iter().filter(|p| p.id != id).collect();
-    write_projects(&filtered);
-    // 同时删除关联的agents和tasks
-    let agents = read_agents();
-    let filtered_agents: Vec<Agent> = agents.into_iter().filter(|a| a.project_id != id).collect();
-    write_agents(&filtered_agents);
-    let tasks = read_tasks();
-    let filtered_tasks: Vec<Task> = tasks.into_iter().filter(|t| t.project_id != id).collect();
-    write_tasks(&filtered_tasks);
+    db::remove_project(get_db(), id);
 }
 
-// ===== Agent存储 =====
-pub fn read_agents() -> Vec<Agent> {
-    let file = agents_file();
-    if !file.exists() {
-        return Vec::new();
-    }
-    match fs::read_to_string(&file) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+pub fn find_project(id: &str) -> Option<Project> {
+    db::find_project(get_db(), id)
 }
 
-pub fn write_agents(agents: &[Agent]) {
-    ensure_data_dir();
-    let content = serde_json::to_string_pretty(agents).expect("序列化Agent失败");
-    fs::write(agents_file(), content).expect("写入Agent文件失败");
-}
-
+// ===== Agent =====
 pub fn read_agents_by_project(project_id: &str) -> Vec<Agent> {
-    read_agents().into_iter().filter(|a| a.project_id == project_id).collect()
-}
-
-pub fn find_agent(id: &str) -> Option<Agent> {
-    read_agents().into_iter().find(|a| a.id == id)
+    db::read_agents_by_project(get_db(), project_id)
 }
 
 pub fn save_agent(agent: &Agent) {
-    let mut agents = read_agents();
-    if let Some(idx) = agents.iter().position(|a| a.id == agent.id) {
-        agents[idx] = agent.clone();
-    } else {
-        agents.push(agent.clone());
-    }
-    write_agents(&agents);
+    db::save_agent(get_db(), agent);
 }
 
 pub fn remove_agent(id: &str) {
-    let agents = read_agents();
-    let filtered: Vec<Agent> = agents.into_iter().filter(|a| a.id != id).collect();
-    write_agents(&filtered);
+    db::remove_agent(get_db(), id);
 }
 
-// ===== 任务存储 =====
-pub fn read_tasks() -> Vec<Task> {
-    let file = tasks_file();
-    if !file.exists() {
-        return Vec::new();
-    }
-    match fs::read_to_string(&file) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+pub fn find_agent(id: &str) -> Option<Agent> {
+    db::find_agent(get_db(), id)
 }
 
-pub fn write_tasks(tasks: &[Task]) {
-    ensure_data_dir();
-    let content = serde_json::to_string_pretty(tasks).expect("序列化任务失败");
-    fs::write(tasks_file(), content).expect("写入任务文件失败");
-}
-
+// ===== 任务 =====
 pub fn read_tasks_by_project(project_id: &str) -> Vec<Task> {
-    read_tasks().into_iter().filter(|t| t.project_id == project_id).collect()
-}
-
-pub fn find_task(id: &str) -> Option<Task> {
-    read_tasks().into_iter().find(|t| t.id == id)
+    db::read_tasks_by_project(get_db(), project_id)
 }
 
 pub fn save_task(task: &Task) {
-    let mut tasks = read_tasks();
-    if let Some(idx) = tasks.iter().position(|t| t.id == task.id) {
-        tasks[idx] = task.clone();
-    } else {
-        tasks.push(task.clone());
-    }
-    write_tasks(&tasks);
+    db::save_task(get_db(), task);
 }
 
 pub fn remove_task(id: &str) {
-    let tasks = read_tasks();
-    let child_ids: Vec<String> = tasks.iter()
-        .filter(|t| t.parent_id.as_deref() == Some(id))
-        .map(|t| t.id.clone())
-        .collect();
-    let filtered: Vec<Task> = tasks.into_iter().filter(|t| t.id != id).collect();
-    write_tasks(&filtered);
-    for cid in child_ids {
-        remove_task(&cid);
-    }
+    db::remove_task(get_db(), id);
 }
 
-// ===== 配置存储 =====
-pub fn read_config() -> AppConfig {
-    let file = config_file();
-    if !file.exists() {
-        return AppConfig::default();
-    }
-    match fs::read_to_string(&file) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
-    }
+pub fn find_task(id: &str) -> Option<Task> {
+    db::find_task(get_db(), id)
 }
 
-pub fn write_config(config: &AppConfig) {
-    ensure_data_dir();
-    let content = serde_json::to_string_pretty(config).expect("序列化配置失败");
-    fs::write(config_file(), content).expect("写入配置文件失败");
-}
-
-// ===== 消息存储 =====
+// ===== 消息 =====
 pub fn read_task_messages(task_id: &str) -> Vec<TaskMessage> {
-    let file = task_messages_file(task_id);
-    if !file.exists() {
-        return Vec::new();
-    }
-    match fs::read_to_string(&file) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+    db::read_task_messages(get_db(), task_id)
 }
 
 pub fn save_task_message(message: &TaskMessage) {
-    ensure_data_dir();
-    let mut messages = read_task_messages(&message.task_id);
-    messages.push(message.clone());
-    let content = serde_json::to_string_pretty(&messages).expect("序列化消息失败");
-    fs::write(task_messages_file(&message.task_id), content).expect("写入消息文件失败");
+    db::save_task_message(get_db(), message);
+}
+
+// ===== 配置 =====
+pub fn read_config() -> AppConfig {
+    db::read_config(get_db())
+}
+
+pub fn write_config(config: &AppConfig) {
+    db::write_config(get_db(), config);
+}
+
+// ===== 标签 =====
+pub fn read_tags_by_project(project_id: &str) -> Vec<Tag> {
+    db::read_tags_by_project(get_db(), project_id)
+}
+
+pub fn save_tag(tag: &Tag) {
+    db::save_tag(get_db(), tag);
+}
+
+pub fn remove_tag(id: &str) {
+    db::remove_tag(get_db(), id);
+}
+
+// ===== 任务依赖 =====
+pub fn get_task_dependencies(task_id: &str) -> Vec<String> {
+    db::get_task_dependencies(get_db(), task_id)
+}
+
+pub fn set_task_dependencies(task_id: &str, depends_on: &[String]) {
+    db::set_task_dependencies(get_db(), task_id, depends_on);
+}
+
+// ===== 文档 =====
+pub fn read_documents_by_project(project_id: &str) -> Vec<ProjectDocument> {
+    db::read_documents_by_project(get_db(), project_id)
+}
+
+pub fn save_document(doc: &ProjectDocument) {
+    db::save_document(get_db(), doc);
+}
+
+pub fn remove_document(id: &str) {
+    db::remove_document(get_db(), id);
+}
+
+pub fn find_document(id: &str) -> Option<ProjectDocument> {
+    db::find_document(get_db(), id)
+}
+
+// ===== 统计 =====
+pub fn get_project_stats(project_id: &str) -> ProjectStats {
+    db::get_project_stats(get_db(), project_id)
 }

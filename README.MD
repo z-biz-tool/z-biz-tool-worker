@@ -1,4 +1,4 @@
-# z-biz-tool-agent-worker
+# z-biz-tool-worker
 
 > AI 任务看板 — 项目管理 / Agent 员工管理 / 任务分配 / 执行监控 / 验收
 

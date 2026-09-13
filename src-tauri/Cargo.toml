@@ -1,11 +1,11 @@
 [package]
-name = "z-biz-tool-agent-worker"
+name = "z-biz-tool-worker"
 version = "0.2.0"
 description = "AI任务看板 - 项目管理/Agent员工管理/任务分配/执行监控/验收"
 edition = "2021"
 
 [lib]
-name = "z_biz_tool_agent_worker_lib"
+name = "z_biz_tool_worker_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
@@ -25,3 +25,4 @@ dirs = "6"
 ureq = "2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

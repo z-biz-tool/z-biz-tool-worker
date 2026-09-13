@@ -2,6 +2,7 @@ mod agent_proxy;
 mod agent_runner;
 mod agent_session;
 mod commands;
+mod db;
 mod models;
 mod storage;
 
@@ -37,11 +38,22 @@ pub fn run() {
             commands::retry_task,
             commands::review_task,
             commands::update_task_status,
+            commands::update_task,
+            commands::batch_update_tasks,
             commands::get_agent_status,
             commands::send_task_message,
             commands::get_task_messages,
             commands::get_config,
             commands::save_config,
+            commands::list_tags,
+            commands::create_tag,
+            commands::delete_tag,
+            commands::get_task_dependencies,
+            commands::set_task_dependencies,
+            commands::list_documents,
+            commands::create_document,
+            commands::update_document,
+            commands::delete_document,
             agent_session::get_agent_session,
             agent_session::set_agent_cli_type,
             agent_session::list_agent_sessions,
