@@ -6,6 +6,10 @@ import {
 import { useViewStore } from "../stores/viewStore";
 import type { ViewType } from "../types";
 
+// 渐变色主题常量
+const brandGradient = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
+const cardBgGradient = "linear-gradient(135deg, rgba(102,126,234,0.04) 0%, rgba(118,75,162,0.04) 100%)";
+
 const VIEW_OPTIONS: { key: ViewType; label: string; icon: React.ReactNode }[] = [
   { key: "dashboard", label: "概览", icon: <DashboardOutlined /> },
   { key: "kanban", label: "看板", icon: <AppstoreOutlined /> },
@@ -29,12 +33,24 @@ export default function TopBar({ projectName }: TopBarProps) {
         display: "flex",
         alignItems: "center",
         padding: "8px 16px",
-        borderBottom: "1px solid #f0f0f0",
-        background: "#fff",
+        borderBottom: `1px solid var(--ant-color-border-secondary)`,
+        background: cardBgGradient,
+        borderRadius: 16,
+        marginBottom: 12,
         gap: 16,
       }}
     >
-      <div style={{ fontWeight: 600, fontSize: 15, whiteSpace: "nowrap" }}>
+      <div 
+        style={{ 
+          fontWeight: 600, 
+          fontSize: 15, 
+          whiteSpace: "nowrap",
+          background: brandGradient,
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+          backgroundImage: brandGradient,
+        }}
+      >
         {projectName}
       </div>
 
@@ -47,7 +63,11 @@ export default function TopBar({ projectName }: TopBarProps) {
                 size="small"
                 icon={v.icon}
                 onClick={() => setView(v.key)}
-                style={{ borderRadius: 6 }}
+                style={{ 
+                  borderRadius: 8,
+                  background: currentView === v.key ? brandGradient : 'transparent',
+                  boxShadow: currentView === v.key ? "0 4px 12px rgba(102,126,234,0.3)" : "none",
+                }}
               >
                 {v.label}
               </Button>
@@ -58,13 +78,25 @@ export default function TopBar({ projectName }: TopBarProps) {
 
       <Space size={8}>
         <Input
-          prefix={<SearchOutlined />}
+          prefix={<SearchOutlined style={{ color: "var(--ant-color-text-tertiary)" }} />}
           placeholder="搜索任务..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          style={{ width: 180 }}
+          style={{ 
+            width: 180,
+            borderRadius: 10,
+            transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+          }}
           size="small"
           allowClear
+          onFocus={(e) => {
+            e.currentTarget.style.boxShadow = '0 2px 8px rgba(102,126,234,0.15)';
+            e.currentTarget.style.border = '1px solid rgba(102,126,234,0.3)';
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.boxShadow = 'none';
+            e.currentTarget.style.border = '';
+          }}
         />
         <Tooltip title="设置">
           <Button
@@ -72,6 +104,7 @@ export default function TopBar({ projectName }: TopBarProps) {
             size="small"
             icon={<SettingOutlined />}
             onClick={() => setView("settings")}
+            style={{ borderRadius: 8 }}
           />
         </Tooltip>
       </Space>

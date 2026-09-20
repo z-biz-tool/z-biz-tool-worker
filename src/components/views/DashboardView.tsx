@@ -6,6 +6,10 @@ import {
 } from "@ant-design/icons";
 import type { Task, Agent, ProjectStats } from "../../types";
 
+// 渐变色主题常量
+const brandGradient = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
+const cardBgGradient = "linear-gradient(135deg, rgba(102,126,234,0.04) 0%, rgba(118,75,162,0.04) 100%)";
+
 const { Title, Text } = Typography;
 
 const STATUS_COLORS: Record<string, string> = {
@@ -48,53 +52,110 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
   return (
     <div style={{ padding: "0 4px" }}>
       {/* 统计卡片 */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card size="small">
+          <Card 
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
+            bodyStyle={{ padding: "12px" }}
+          >
             <Statistic
-              title="总任务"
+              title={
+                <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>总任务</span>
+              }
               value={stats?.tasks.total || 0}
-              prefix={<ProjectOutlined />}
+              prefix={<ProjectOutlined style={{ color: brandGradient }} />}
+              valueStyle={{ fontSize: 20, fontWeight: 600 }}
             />
           </Card>
         </Col>
         <Col span={6}>
-          <Card size="small">
+          <Card 
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
+            bodyStyle={{ padding: "12px" }}
+          >
             <Statistic
-              title="进行中"
+              title={
+                <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>进行中</span>
+              }
               value={stats?.tasks.doing || 0}
-              valueStyle={{ color: "#1677ff" }}
-              prefix={<PlayCircleOutlined />}
+              valueStyle={{ color: "#1677ff", fontSize: 20, fontWeight: 600 }}
+              prefix={<PlayCircleOutlined style={{ color: "#1677ff" }} />}
             />
           </Card>
         </Col>
         <Col span={6}>
-          <Card size="small">
+          <Card 
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
+            bodyStyle={{ padding: "12px" }}
+          >
             <Statistic
-              title="Agent 数"
+              title={
+                <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>Agent 数</span>
+              }
               value={stats?.agents.total || 0}
-              prefix={<TeamOutlined />}
+              prefix={<TeamOutlined style={{ color: brandGradient }} />}
+              valueStyle={{ fontSize: 20, fontWeight: 600 }}
             />
           </Card>
         </Col>
         <Col span={6}>
-          <Card size="small">
-            <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>完成率</Text>
-              <Progress
-                percent={completedRate}
-                size="small"
-                status={completedRate === 100 ? "success" : "active"}
-              />
-            </div>
+          <Card 
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
+            bodyStyle={{ padding: "12px" }}
+          >
+            <Text style={{ fontSize: 12, color: "var(--ant-color-text-secondary)", display: "block", marginBottom: 8 }}>完成率</Text>
+            <Progress
+              percent={completedRate}
+              size="small"
+              status={completedRate === 100 ? "success" : "active"}
+              strokeColor={{
+                '0%': '#667eea',
+                '100%': '#764ba2',
+              }}
+            />
           </Card>
         </Col>
       </Row>
 
-      <Row gutter={16}>
+      <Row gutter={[16, 16]}>
         {/* 任务状态分布 */}
         <Col span={12}>
-          <Card title="任务状态分布" size="small">
+          <Card 
+            title={
+              <span style={{ 
+                fontWeight: 600,
+                background: brandGradient,
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundImage: brandGradient,
+              }}>任务状态分布</span>
+            }
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+            }}
+          >
             {stats && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {(["todo", "doing", "waiting", "review", "done"] as const).map((s) => {
@@ -129,7 +190,22 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
 
         {/* Agent 工作负载 */}
         <Col span={12}>
-          <Card title="Agent 工作负载" size="small">
+          <Card 
+            title={
+              <span style={{ 
+                fontWeight: 600,
+                background: brandGradient,
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundImage: brandGradient,
+              }}>Agent 工作负载</span>
+            }
+            size="small"
+            style={{ 
+              borderRadius: 12,
+              background: cardBgGradient,
+            }}
+          >
             {agentWorkload.length === 0 ? (
               <Text type="secondary">暂无 Agent 工作数据</Text>
             ) : (
@@ -157,7 +233,23 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
       </Row>
 
       {/* 近期活动 */}
-      <Card title="近期活动" size="small" style={{ marginTop: 16 }}>
+      <Card 
+        title={
+          <span style={{ 
+            fontWeight: 600,
+            background: brandGradient,
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            backgroundImage: brandGradient,
+          }}>近期活动</span>
+        }
+        size="small" 
+        style={{ 
+          marginTop: 16,
+          borderRadius: 12,
+          background: cardBgGradient,
+        }}
+      >
         <Timeline
           items={recentTasks.map((t) => ({
             color: STATUS_COLORS[t.status],
