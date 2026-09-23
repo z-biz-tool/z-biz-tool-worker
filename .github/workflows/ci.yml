@@ -75,10 +75,20 @@ jobs:
       - name: Reset broken cargo config
         run: rm -f "$HOME/.cargo/config.toml"
 
-      - name: Build frontend (for Tauri context)
+      # agent-proxy 自己是独立 package.json、没有锁文件，它的 build 用 tsc 编译 src/*.ts；
+      # 这里显式装它自己的依赖，不靠"父目录 node_modules 里刚好有 tsc"这种巧合。
+      - name: Install agent-proxy deps
+        working-directory: agent-proxy
+        run: npm install --registry=https://registry.npmmirror.com
+
+      - name: Build frontend + agent-proxy (for Tauri context)
         run: |
           npm ci --registry=https://registry.npmmirror.com
-          npm run build
+          # 必须用 build:all 而不是 build：tauri.conf.json 的 bundle.resources 里声明了
+          # "../agent-proxy/dist"，而 agent-proxy/dist 被 .gitignore 的 dist/ 规则挡住、不进仓库。
+          # 只 build 前端时 tauri 的 build script 直接失败：
+          # "resource path `../agent-proxy/dist` doesn't exist"（CI 实测红过这一次）。
+          npm run build:all
 
       - name: Tests
         working-directory: src-tauri
