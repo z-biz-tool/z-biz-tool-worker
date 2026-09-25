@@ -1,6 +1,7 @@
 {
   "name": "agent-proxy",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Local OpenAI-compatible proxy that bridges to Hermes / OpenCode / Claude Code. Node.js rewrite of future-team-agent-proxy.",
   "type": "commonjs",
