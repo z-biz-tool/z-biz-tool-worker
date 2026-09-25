@@ -1,6 +1,7 @@
 {
   "name": "z-biz-tool-worker",
   "version": "0.2.0",
+  "license": "MIT",
   "description": "AI任务看板 - 项目管理/Agent员工管理/任务分配/执行监控/验收",
   "type": "module",
   "scripts": {

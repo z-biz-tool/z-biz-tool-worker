@@ -3,6 +3,7 @@ name = "z-biz-tool-worker"
 version = "0.2.0"
 description = "AI任务看板 - 项目管理/Agent员工管理/任务分配/执行监控/验收"
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "z_biz_tool_worker_lib"
