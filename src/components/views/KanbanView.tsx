@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
   DragEndEvent, DragOverlay, DragStartEvent,
@@ -14,6 +14,7 @@ import {
 } from "@ant-design/icons";
 import type { Task, Agent } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
+import { useDraft } from "../../hooks/useDraft";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -34,6 +35,8 @@ interface KanbanViewProps {
   tasks: Task[];
   agents: Agent[];
   onTaskClick: (task: Task) => void;
+  /** ⌘N 之类的快捷键在 App 层递增它，这里收到就弹新建任务框 */
+  openNewTaskSignal?: number;
 }
 
 // 可拖拽的任务卡片
@@ -153,12 +156,18 @@ function DragOverlayCard({ task, agents }: { task: Task; agents: Agent[] }) {
   );
 }
 
-export default function KanbanView({ tasks, agents, onTaskClick }: KanbanViewProps) {
+export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSignal }: KanbanViewProps) {
   const store = useWorkerStore();
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [newTaskStatus, setNewTaskStatus] = useState<string>("todo");
-  const [newTaskForm, setNewTaskForm] = useState({ title: "", desc: "" });
+  const [newTaskForm, setNewTaskForm, resetNewTaskForm] = useDraft("task-new", { title: "", desc: "" });
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+
+  useEffect(() => {
+    if (!openNewTaskSignal) return;
+    setNewTaskStatus("todo");
+    setNewTaskOpen(true);
+  }, [openNewTaskSignal]);
 
   const orderedStatuses: Array<keyof typeof STATUS_CONFIG> = ["todo", "doing", "waiting", "review", "done"];
 
@@ -203,8 +212,8 @@ export default function KanbanView({ tasks, agents, onTaskClick }: KanbanViewPro
     }
 
     if (targetStatus && targetStatus !== task.status) {
-      await store.updateTaskStatus(taskId, targetStatus);
-      message.success(`任务已移动到「${STATUS_CONFIG[targetStatus]?.label}」`);
+      const ok = await store.updateTaskStatus(taskId, targetStatus);
+      if (ok) message.success(`任务已移动到「${STATUS_CONFIG[targetStatus]?.label}」`);
     }
   };
 
@@ -212,9 +221,11 @@ export default function KanbanView({ tasks, agents, onTaskClick }: KanbanViewPro
     if (!newTaskForm.title.trim()) return message.warning("请输入任务标题");
     const currentProject = store.projects.find((p) => p.id === store.currentProjectId);
     if (!currentProject) return;
-    await store.createTask(currentProject.id, newTaskForm.title, newTaskForm.desc);
+    const ok = await store.createTask(currentProject.id, newTaskForm.title.trim(), newTaskForm.desc);
+    if (!ok) return;
+    message.success("任务已创建");
     setNewTaskOpen(false);
-    setNewTaskForm({ title: "", desc: "" });
+    resetNewTaskForm();
   };
 
   const openNewTask = (status: string) => {

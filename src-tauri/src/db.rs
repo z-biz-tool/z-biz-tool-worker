@@ -315,11 +315,43 @@ pub fn read_projects(db: &Database) -> Vec<Project> {
 
 pub fn save_project(db: &Database, project: &Project) {
     let conn = db.conn.lock().unwrap();
+    // 不能写 INSERT OR REPLACE：外键开启时它先删冲突行再插，
+    // ON DELETE CASCADE 会把该项目的 tasks/agents 一起删掉。
     let _ = conn.execute(
-        "INSERT OR REPLACE INTO projects (id, name, description, icon, color, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO projects (id, name, description, icon, color, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           description = excluded.description,
+           icon = excluded.icon,
+           color = excluded.color,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at",
         params![project.id, project.name, project.description, project.icon, project.color, project.created_at, project.updated_at],
     );
+}
+
+/// 原地改 name/updated_at：id 与 created_at 不动，指向该项目的任务/Agent 不受影响。
+pub fn rename_project(db: &Database, id: &str, name: &str, now: &str) -> Result<Project, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("项目名称不能为空".to_string());
+    }
+    find_project(db, id).ok_or("项目不存在")?;
+    let duplicated = read_projects(db)
+        .into_iter()
+        .any(|p| p.id != id && p.name.trim().to_lowercase() == trimmed.to_lowercase());
+    if duplicated {
+        return Err("已存在同名项目".to_string());
+    }
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE projects SET name = ?1, updated_at = ?2 WHERE id = ?3",
+        params![trimmed, now, id],
+    )
+    .map_err(|e| format!("重命名项目失败: {}", e))?;
+    drop(conn);
+    find_project(db, id).ok_or("重命名后项目读取失败".to_string())
 }
 
 pub fn remove_project(db: &Database, id: &str) {
@@ -485,11 +517,36 @@ pub fn save_task(db: &Database, task: &Task) {
     let tags_json = serde_json::to_string(&task.tags).unwrap_or_default();
 
     let _ = conn.execute(
-        "INSERT OR REPLACE INTO tasks (id, project_id, parent_id, title, description, status,
+        // 同 save_project：INSERT OR REPLACE 会先删行，tasks 名下挂着 task_messages /
+        // task_attachments / task_dependencies / 子任务，全都 ON DELETE CASCADE，
+        // 于是"改一下状态"就把这条任务的来龙去脉连带子任务一起删了。
+        "INSERT INTO tasks (id, project_id, parent_id, title, description, status,
          priority, start_date, due_date, milestone, assigned_agent_id, assigned_agent_name,
          children, output, agent_output, waiting_for_input, receipts, custom_fields, tags,
          sort_order, created_at, updated_at, completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+         ON CONFLICT(id) DO UPDATE SET
+           project_id = excluded.project_id,
+           parent_id = excluded.parent_id,
+           title = excluded.title,
+           description = excluded.description,
+           status = excluded.status,
+           priority = excluded.priority,
+           start_date = excluded.start_date,
+           due_date = excluded.due_date,
+           milestone = excluded.milestone,
+           assigned_agent_id = excluded.assigned_agent_id,
+           assigned_agent_name = excluded.assigned_agent_name,
+           children = excluded.children,
+           output = excluded.output,
+           agent_output = excluded.agent_output,
+           waiting_for_input = excluded.waiting_for_input,
+           receipts = excluded.receipts,
+           custom_fields = excluded.custom_fields,
+           tags = excluded.tags,
+           sort_order = excluded.sort_order,
+           updated_at = excluded.updated_at,
+           completed_at = excluded.completed_at",
         params![
             task.id, task.project_id, task.parent_id, task.title, task.description, task.status,
             task.priority, task.start_date, task.due_date, task.milestone as i32, task.assigned_agent_id,
@@ -765,5 +822,140 @@ pub fn get_project_stats(db: &Database, project_id: &str) -> ProjectStats {
             idle: agents.iter().filter(|s| s.as_str() == "idle").count() as i32,
             offline: agents.iter().filter(|s| s.as_str() == "offline").count() as i32,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_db() -> Database {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        let db = Database { conn: Mutex::new(conn) };
+        db.init_schema().expect("schema");
+        db
+    }
+
+    fn insert_project(db: &Database, id: &str, name: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, description, icon, color, created_at, updated_at)
+             VALUES (?1, ?2, '', '', '#1677ff', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, name],
+        )
+        .unwrap();
+    }
+
+    fn insert_task(db: &Database, id: &str, project_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, project_id, title, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'todo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, project_id, format!("task {}", id)],
+        )
+        .unwrap();
+    }
+
+    fn task_count(db: &Database, project_id: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rename_project_keeps_id_and_children() {
+        let db = memory_db();
+        insert_project(&db, "p1", "旧名字");
+        insert_task(&db, "t1", "p1");
+
+        let renamed = rename_project(&db, "p1", "  新名字  ", "2026-02-02T00:00:00Z").unwrap();
+
+        assert_eq!(renamed.id, "p1");
+        assert_eq!(renamed.name, "新名字");
+        assert_eq!(renamed.created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(renamed.updated_at, "2026-02-02T00:00:00Z");
+        // 关键：改名不能因为 OR REPLACE 的级联把子表带走
+        assert_eq!(task_count(&db, "p1"), 1);
+    }
+
+    #[test]
+    fn rename_project_rejects_blank_missing_and_duplicate() {
+        let db = memory_db();
+        insert_project(&db, "p1", "甲项目");
+        insert_project(&db, "p2", "乙项目");
+
+        assert!(rename_project(&db, "p1", "   ", "2026-02-02T00:00:00Z").is_err());
+        assert!(rename_project(&db, "nope", "新名字", "2026-02-02T00:00:00Z").is_err());
+        assert!(rename_project(&db, "p1", " 乙项目 ", "2026-02-02T00:00:00Z").is_err());
+        // 只改大小写空格、名字没变的情况不该被查重拦住
+        assert!(rename_project(&db, "p1", "甲项目", "2026-02-02T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn save_project_upsert_does_not_cascade_children() {
+        let db = memory_db();
+        let mut p = Project {
+            id: "p1".to_string(),
+            name: "甲".to_string(),
+            description: String::new(),
+            icon: String::new(),
+            color: "#1677ff".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        save_project(&db, &p);
+        insert_task(&db, "t1", "p1");
+
+        p.name = "乙".to_string();
+        p.updated_at = "2026-03-03T00:00:00Z".to_string();
+        save_project(&db, &p);
+
+        assert_eq!(find_project(&db, "p1").unwrap().name, "乙");
+        assert_eq!(task_count(&db, "p1"), 1);
+    }
+
+    #[test]
+    fn save_task_upsert_keeps_messages_attachments_and_subtasks() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task(&db, "t1", "p1");
+        insert_task(&db, "t2", "p1");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE tasks SET parent_id = 't1' WHERE id = 't2'", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO task_messages (id, task_id, role, content, created_at)
+                 VALUES ('m1', 't1', 'user', '来龙去脉', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_attachments (id, task_id, filename, filepath, created_at)
+                 VALUES ('a1', 't1', 'f.txt', '/tmp/f.txt', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut task = find_task(&db, "t1").expect("t1 exists");
+        task.status = "doing".to_string();
+        save_task(&db, &task);
+
+        let conn = db.conn.lock().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM task_messages WHERE task_id='t1'"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM task_attachments WHERE task_id='t1'"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM tasks WHERE parent_id='t1'"), 1);
+        drop(conn);
+
+        let saved = find_task(&db, "t1").expect("t1 survives its own save");
+        assert_eq!(saved.status, "doing");
+        assert_eq!(saved.created_at, "2026-01-01T00:00:00Z");
     }
 }

@@ -33,6 +33,10 @@ pub fn find_project(id: &str) -> Option<Project> {
     db::find_project(get_db(), id)
 }
 
+pub fn rename_project(id: &str, name: &str, now: &str) -> Result<Project, String> {
+    db::rename_project(get_db(), id, name, now)
+}
+
 // ===== Agent =====
 pub fn read_agents_by_project(project_id: &str) -> Vec<Agent> {
     db::read_agents_by_project(get_db(), project_id)

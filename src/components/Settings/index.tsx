@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Typography, Switch, Select, InputNumber, Input, Divider, Button, Space, message, Tabs } from "antd";
+import { Typography, Switch, Select, InputNumber, Input, Divider, Button, Space, message, Tabs, Alert, Spin } from "antd";
 import { ArrowLeftOutlined, TagsOutlined, SettingOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppConfig } from "../../types";
@@ -32,14 +32,19 @@ interface SettingsProps {
 export default function Settings({ onBack }: SettingsProps) {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    setLoadError(null);
+    invoke<AppConfig>("get_config")
+      .then((c) => setConfig({ ...DEFAULT_CONFIG, ...c }))
+      .catch((e: any) => setLoadError(`读取设置失败：${e?.toString?.() || e}`))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
-    invoke<AppConfig>("get_config")
-      .then((c) => {
-        setConfig({ ...DEFAULT_CONFIG, ...c });
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    load();
   }, []);
 
   const save = async (newConfig: AppConfig) => {
@@ -47,8 +52,8 @@ export default function Settings({ onBack }: SettingsProps) {
     try {
       await invoke("save_config", { config: newConfig });
       message.success("已保存");
-    } catch {
-      message.error("保存失败");
+    } catch (e: any) {
+      message.error(`保存失败：${e?.toString?.() || e}`);
     }
   };
 
@@ -65,6 +70,25 @@ export default function Settings({ onBack }: SettingsProps) {
       </div>
 
       <div style={{ flex: 1, overflow: "auto", padding: "20px 32px" }}>
+        {loading && (
+          <div style={{ textAlign: "center", padding: 40 }}>
+            <Spin tip="读取设置中" />
+          </div>
+        )}
+        {loadError && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="设置读取失败，下方为默认值"
+            description={loadError}
+            action={
+              <Button size="small" onClick={load}>
+                重试
+              </Button>
+            }
+          />
+        )}
         <Tabs
           defaultActiveKey="ai"
           items={[

@@ -23,6 +23,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::create_project,
+            commands::rename_project,
             commands::delete_project,
             commands::get_project_stats,
             commands::list_agents,

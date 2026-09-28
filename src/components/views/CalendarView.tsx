@@ -3,6 +3,7 @@ import { Card, Typography, Tag, Space, Button, Modal, Input, message } from "ant
 import { LeftOutlined, RightOutlined, PlusOutlined } from "@ant-design/icons";
 import type { Task } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
+import { useDraft } from "../../hooks/useDraft";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -24,7 +25,7 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [selectedDate, setSelectedDate] = useState("");
-  const [newTaskForm, setNewTaskForm] = useState({ title: "", desc: "" });
+  const [newTaskForm, setNewTaskForm, resetNewTaskForm] = useDraft("task-new", { title: "", desc: "" });
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
@@ -57,9 +58,11 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
     if (!newTaskForm.title.trim()) return message.warning("请输入任务标题");
     const currentProject = store.projects.find((p) => p.id === store.currentProjectId);
     if (!currentProject) return;
-    await store.createTask(currentProject.id, newTaskForm.title, newTaskForm.desc);
+    const ok = await store.createTask(currentProject.id, newTaskForm.title.trim(), newTaskForm.desc);
+    if (!ok) return;
+    message.success("任务已创建");
     setNewTaskOpen(false);
-    setNewTaskForm({ title: "", desc: "" });
+    resetNewTaskForm();
   };
 
   const openNewTask = (day: number) => {

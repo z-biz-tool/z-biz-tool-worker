@@ -1,8 +1,8 @@
-# Z-CC Worker 技术规格文档
+# Z-Biz Worker 技术规格文档
 
 ## 一、项目概述
 
-**项目名称：** Z-CC Worker
+**项目名称：** z-biz-tool-worker
 **项目类型：** 多Agent协作的任务管理系统
 **核心功能：** 通过多Agent并行执行 + 父子任务拆解 + 事件驱动协作，实现复杂任务的自动化执行
 **目标用户：** 需要多Agent协同处理复杂项目的团队/个人
@@ -63,7 +63,7 @@
 ### 3.1 项目目录结构
 
 ```
-z-cc-worker/
+z-biz-tool-worker/
 ├── data/                          # 数据根目录
 │   └── projects/                 # 项目目录
 │       └── {project_id}/         # 单个项目（完全隔离）

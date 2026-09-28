@@ -72,7 +72,12 @@ export default function WorkflowEditor({ onSave }: WorkflowEditorProps) {
   };
 
   const handleSave = () => {
-    if (onSave) onSave(statuses);
+    // 后端还没有 workflow_templates 的命令，没有 onSave 时不能说"已保存"骗用户
+    if (!onSave) {
+      message.warning("工作流暂未接入存储，本次改动不会保存");
+      return;
+    }
+    onSave(statuses);
     message.success("工作流已保存");
   };
 

@@ -40,7 +40,14 @@ interface TaskDetailPanelProps {
   onClose: () => void;
 }
 
-export default function TaskDetailPanel({ task, agents, open, onClose }: TaskDetailPanelProps) {
+// task 在 null/非 null 间切换会让同一组件的 hooks 数量变化（React 直接抛错），
+// 所以提前 return 放在包装层，让整棵子树装卸。
+export default function TaskDetailPanel(props: TaskDetailPanelProps) {
+  if (!props.task) return null;
+  return <TaskDetailPanelBody {...props} task={props.task} />;
+}
+
+function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelProps & { task: Task }) {
   const store = useWorkerStore();
   const [messages, setMessages] = useState<TaskMessage[]>([]);
   const [newMsg, setNewMsg] = useState("");
@@ -51,27 +58,34 @@ export default function TaskDetailPanel({ task, agents, open, onClose }: TaskDet
   const [editingDesc, setEditingDesc] = useState(false);
   const [descValue, setDescValue] = useState("");
 
-  if (!task) return null;
-
   const loadMessages = async () => {
     try {
       const msgs = await invoke<TaskMessage[]>("get_task_messages", { taskId: task.id });
       setMessages(msgs);
-    } catch {}
+    } catch (e: any) {
+      setMessages([]);
+      message.error(`加载任务消息失败：${e?.toString?.() || e}`);
+    }
   };
 
   const loadDependencies = async () => {
     try {
       const deps = await invoke<string[]>("get_task_dependencies", { taskId: task.id });
       setDependencies(deps);
-    } catch {}
+    } catch (e: any) {
+      setDependencies([]);
+      message.error(`加载依赖关系失败：${e?.toString?.() || e}`);
+    }
   };
 
   const loadAllTasks = async () => {
     try {
       const tasks = await invoke<Task[]>("list_tasks", { projectId: task.project_id });
       setAllTasks(tasks.filter((t) => t.id !== task.id));
-    } catch {}
+    } catch (e: any) {
+      setAllTasks([]);
+      message.error(`加载可选依赖任务失败：${e?.toString?.() || e}`);
+    }
   };
 
   useEffect(() => {
@@ -83,38 +97,33 @@ export default function TaskDetailPanel({ task, agents, open, onClose }: TaskDet
   }, [open, task?.id]);
 
   const handleStatusChange = async (status: string) => {
-    await store.updateTaskStatus(task.id, status);
-    message.success("状态已更新");
+    if (await store.updateTaskStatus(task.id, status)) message.success("状态已更新");
   };
 
   const handlePriorityChange = async (priority: number) => {
-    await invoke("update_task", { taskId: task.id, params: { priority } });
-    store.selectProject(task.project_id);
+    await store.updateTask(task.id, { priority });
   };
 
   const handleDateChange = async (field: "start_date" | "due_date", date: dayjs.Dayjs | null) => {
-    await invoke("update_task", { taskId: task.id, params: { [field]: date ? date.format("YYYY-MM-DD") : null } });
-    store.selectProject(task.project_id);
+    await store.updateTask(task.id, { [field]: date ? date.format("YYYY-MM-DD") : null });
   };
 
   const handleMilestoneToggle = async () => {
-    await invoke("update_task", { taskId: task.id, params: { milestone: !task.milestone } });
-    store.selectProject(task.project_id);
-    message.success(task.milestone ? "已取消里程碑" : "已设为里程碑");
+    const wasMilestone = task.milestone;
+    if (await store.updateTask(task.id, { milestone: !wasMilestone })) {
+      message.success(wasMilestone ? "已取消里程碑" : "已设为里程碑");
+    }
   };
 
   const handleAddTag = async () => {
     if (!newTag.trim()) return;
     const tags = [...(task.tags || []), newTag.trim()];
-    await invoke("update_task", { taskId: task.id, params: { tags } });
-    store.selectProject(task.project_id);
-    setNewTag("");
+    if (await store.updateTask(task.id, { tags })) setNewTag("");
   };
 
   const handleRemoveTag = async (tag: string) => {
     const tags = (task.tags || []).filter((t) => t !== tag);
-    await invoke("update_task", { taskId: task.id, params: { tags } });
-    store.selectProject(task.project_id);
+    await store.updateTask(task.id, { tags });
   };
 
   const handleDependencyToggle = async (depId: string) => {
@@ -131,10 +140,10 @@ export default function TaskDetailPanel({ task, agents, open, onClose }: TaskDet
   };
 
   const handleSaveDesc = async () => {
-    await invoke("update_task", { taskId: task.id, params: { description: descValue } });
-    store.selectProject(task.project_id);
-    setEditingDesc(false);
-    message.success("描述已保存");
+    if (await store.updateTask(task.id, { description: descValue })) {
+      setEditingDesc(false);
+      message.success("描述已保存");
+    }
   };
 
   const handleSendMessage = async () => {

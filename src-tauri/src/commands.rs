@@ -43,6 +43,13 @@ pub fn delete_project(id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 改名只动 name/updated_at：项目 id 不变，任务与 Agent 的归属关系保持原样。
+#[tauri::command]
+pub fn rename_project(id: String, name: String) -> Result<Project, String> {
+    let now = Utc::now().to_rfc3339();
+    storage::rename_project(&id, &name, &now)
+}
+
 #[tauri::command]
 pub fn get_project_stats(id: String) -> Result<ProjectStats, String> {
     let tasks = storage::read_tasks_by_project(&id);

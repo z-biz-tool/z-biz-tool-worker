@@ -4,6 +4,7 @@ import { PlusOutlined, DeleteOutlined, UserOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { Task, Agent } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
+import { useDraft } from "../../hooks/useDraft";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -32,24 +33,28 @@ interface ListViewProps {
 export default function ListView({ tasks, agents, onTaskClick }: ListViewProps) {
   const store = useWorkerStore();
   const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const [newTaskForm, setNewTaskForm] = useState({ title: "", desc: "" });
+  const [newTaskForm, setNewTaskForm, resetNewTaskForm] = useDraft("task-new", { title: "", desc: "" });
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   const handleCreateTask = async () => {
     if (!newTaskForm.title.trim()) return message.warning("请输入任务标题");
     const currentProject = store.projects.find((p) => p.id === store.currentProjectId);
     if (!currentProject) return;
-    await store.createTask(currentProject.id, newTaskForm.title, newTaskForm.desc);
+    const ok = await store.createTask(currentProject.id, newTaskForm.title.trim(), newTaskForm.desc);
+    if (!ok) return;
+    message.success("任务已创建");
     setNewTaskOpen(false);
-    setNewTaskForm({ title: "", desc: "" });
+    resetNewTaskForm();
   };
 
   const handleBatchStatusChange = async (status: string) => {
-    for (const id of selectedRowKeys) {
-      await store.updateTaskStatus(id as string, status);
-    }
+    const ids = [...selectedRowKeys] as string[];
+    const results = await Promise.all(ids.map((id) => store.updateTaskStatus(id, status)));
+    const done = results.filter(Boolean).length;
     setSelectedRowKeys([]);
-    message.success(`已批量更新 ${selectedRowKeys.length} 个任务`);
+    if (done === 0) return;
+    if (done === ids.length) message.success(`已批量更新 ${done} 个任务`);
+    else message.warning(`已更新 ${done} 个任务，${ids.length - done} 个失败`);
   };
 
   const columns: ColumnsType<Task> = [
