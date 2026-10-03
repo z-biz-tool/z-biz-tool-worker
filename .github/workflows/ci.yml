@@ -39,7 +39,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --registry=https://registry.npmmirror.com
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -79,11 +79,11 @@ jobs:
       # 这里显式装它自己的依赖，不靠"父目录 node_modules 里刚好有 tsc"这种巧合。
       - name: Install agent-proxy deps
         working-directory: agent-proxy
-        run: npm install --registry=https://registry.npmmirror.com
+        run: npm install
 
       - name: Build frontend + agent-proxy (for Tauri context)
         run: |
-          npm ci --registry=https://registry.npmmirror.com
+          npm ci
           # 必须用 build:all 而不是 build：tauri.conf.json 的 bundle.resources 里声明了
           # "../agent-proxy/dist"，而 agent-proxy/dist 被 .gitignore 的 dist/ 规则挡住、不进仓库。
           # 只 build 前端时 tauri 的 build script 直接失败：
