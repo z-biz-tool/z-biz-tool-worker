@@ -490,11 +490,12 @@ test("tasksSignature：description 不参与指纹，改描述不会触发换引
   assert.equal(tasksSignature([task({ description: "换了个描述" })]), tasksSignature([task()]));
 });
 
-test("tasksSignature【疑似缺陷】：status 没有 ?? 兜底，字段缺失时会往签名里写进字面量 'undefined'", () => {
-  // 其余字段都写了 `?? ""` / `?? 0`，唯独 status 直接插值；缺字段的脏数据会产生
-  // "z:undefined:0:::|:" 这种签名，与真正的 status 值无法区分
-  assert.equal(tasksSignature([dirty<Task>({ id: "z" })]), "z:undefined:0:::|:");
-  assert.equal(tasksSignature([task({ status: dirty<Task["status"]>(undefined) })]), "t1:undefined:1:登录页改版:a1:|:2026-01-02T00:00:00Z");
+test("tasksSignature：status 缺失时以空串占位，不往签名里写进字面量 'undefined'", () => {
+  // 这条原本锁的是**缺陷**行为（status 少了 `?? ""`，缺字段时产出
+  // "z:undefined:0:::|:"，与真正的 status 值无法区分）。2026-10-03 已修，
+  // 现在改为锁定修复后的行为：与其它字段一致，缺失一律空串。
+  assert.equal(tasksSignature([dirty<Task>({ id: "z" })]), "z::0:::|:");
+  assert.equal(tasksSignature([task({ status: dirty<Task["status"]>(undefined) })]), "t1::1:登录页改版:a1:|:2026-01-02T00:00:00Z");
   assert.equal(tasksSignature([task({ status: "todo" })]), "t1:todo:1:登录页改版:a1:|:2026-01-02T00:00:00Z");
 });
 
@@ -506,13 +507,25 @@ test("tasksSignature：同内容不同数组实例必须得到相同值（轮询
   assert.equal(tasksSignature(p1), tasksSignature(p1));
 });
 
-test("tasksSignature【已证实的碰撞】：字段值里含换行时，1 条任务与 2 条任务签名完全相同", () => {
-  // 实测：分隔符 \n 与 : 未做转义。只要任一文本字段里出现 \n，两种不同任务列表就会撞出同一签名，
-  // 轮询比对会误判为"数据没变"从而跳过重渲染，界面停留在旧数据。锁定现状以便将来定位。
+test("tasksSignature：字段值含换行时不能再撞出同一签名（2026-10-03 已修的碰撞）", () => {
+  // 这条原本锁的是**已证实的碰撞**：字段值里的裸换行与记录分隔用的 "\n"
+  // 不可区分，于是 1 条任务与 2 条不同的任务算出完全相同的签名 ⇒ 轮询比对
+  // 误判为"数据没变"，跳过 patch，界面停在旧数据。
+  // 修复方式：字段值里的 \ / \n / \r 转义。普通数据签名逐字节不变。
   const a = task({ id: "a", title: "x", updated_at: "U\nb:todo:1:x:a1:|:V" });
   const b = task({ id: "a", title: "x", updated_at: "U" });
   const c = task({ id: "b", title: "x", updated_at: "V" });
-  assert.equal(tasksSignature([a]), tasksSignature([b, c]));
+  assert.notEqual(
+    tasksSignature([a]),
+    tasksSignature([b, c]),
+    "含换行的字段值让 1 条与 2 条任务撞出同一签名 —— 轮询会漏刷新",
+  );
+});
+
+test("tasksSignature：转义不影响普通数据 —— 不含特殊字符时签名格式与原来一致", () => {
+  // 防止"为了转义把整个格式改掉"：分隔符没被转义，普通数据的签名必须保持原样。
+  assert.equal(tasksSignature([task({ status: "todo" })]), "t1:todo:1:登录页改版:a1:|:2026-01-02T00:00:00Z");
+  assert.equal(agentsSignature([dirty<Agent>({ id: "a1", name: "甲", status: "idle" })]), "a1:甲:idle::");
 });
 
 test("tasksSignature：入参为 null / undefined 时抛 TypeError", () => {
