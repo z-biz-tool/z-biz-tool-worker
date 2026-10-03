@@ -44,6 +44,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # 本仓的 tests/*.test.ts 此前从来没进过 CI：仓库里有测试、package.json 里有
+      # test 脚本，但这条流水线只跑 typecheck + build（Rust 那边有 cargo test，
+      # 前端这边一个断言都没跑）。改了逻辑红了，CI 不会知道。
+      # 放在 Build 之前：断言是秒级的，挂在构建后面等于白挂。
+      - name: Unit tests
+        run: npm test
+
       # dist 在 .gitignore 里，而 tauri::generate_context! 要读 frontendDist，
       # 所以任何 cargo 步骤之前必须先出一次前端。
       - name: Build frontend
