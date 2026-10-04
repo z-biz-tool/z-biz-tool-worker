@@ -1,5 +1,9 @@
 node_modules/
 dist/
+# agent-proxy 故意不跟踪锁文件（它没有锁文件，见 ci.yml 的说明）。
+# 但照 ci.yml 的步骤本地构建时 `npm install` 会生成它 —— 不忽略的话，
+# 每个照文档构建过的人都会看到一处未跟踪噪音，且分不清是自己弄脏的还是本来就脏。
+agent-proxy/package-lock.json
 src-tauri/target/
 src-tauri/gen/
 src-tauri/.cargo/
