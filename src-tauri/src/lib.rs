@@ -14,8 +14,6 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         // Owned by the app so the event loop can find it on shutdown.
         .manage(agent_proxy::AgentProxyHandle(Mutex::new(None)))
         // Agent -> proxy session mapping. Survives across launches.
