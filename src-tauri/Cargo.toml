@@ -25,3 +25,8 @@ ureq = "2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+# 杀整个子进程组要用到 killpg。libc 本来就被 tauri / reqwest 传递依赖进来，
+# 这里只是把它提成 Unix 侧的直接依赖，Cargo.lock 的版本不变。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
