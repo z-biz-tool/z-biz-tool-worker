@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1F7A3D"/>
+      <stop offset="1" stop-color="#34E8D2"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7FF9E8" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#7FF9E8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="232" fill="url(#bg)"/>
+
+  <!-- 看板 -->
+  <rect x="212" y="262" width="600" height="500" rx="84" fill="#FFFFFF"/>
+
+  <!-- 列标题 -->
+  <rect x="260" y="312" width="130" height="32" rx="16" fill="#122A33" fill-opacity="0.18"/>
+  <rect x="446" y="312" width="130" height="32" rx="16" fill="#122A33" fill-opacity="0.18"/>
+  <rect x="632" y="312" width="130" height="32" rx="16" fill="#34E8D2"/>
+
+  <!-- 卡片 -->
+  <g fill="#122A33" fill-opacity="0.12">
+    <rect x="260" y="386" width="130" height="108" rx="28"/>
+    <rect x="260" y="520" width="130" height="108" rx="28"/>
+    <rect x="446" y="386" width="130" height="108" rx="28"/>
+    <rect x="446" y="520" width="130" height="108" rx="28"/>
+    <rect x="632" y="520" width="130" height="108" rx="28"/>
+  </g>
+
+  <!-- 完成列的高亮卡 -->
+  <circle cx="697" cy="440" r="120" fill="url(#glow)"/>
+  <rect x="632" y="386" width="130" height="108" rx="28" fill="#34E8D2"/>
+  <path d="M662 440 L688 466 L734 412"
+        fill="none" stroke="#122A33" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 流转箭头 -->
+  <path d="M420 470 L604 470" stroke="#FF6B6B" stroke-width="26" stroke-linecap="round"
+        stroke-dasharray="8 44"/>
+</svg>
