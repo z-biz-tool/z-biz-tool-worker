@@ -2,69 +2,35 @@ import { useMemo, useState } from "react";
 import { Typography, Tag, Space, Button, Select } from "antd";
 import { LeftOutlined, RightOutlined } from "@ant-design/icons";
 import type { Task } from "../../types";
+import {
+  GANTT_STATUS_COLORS,
+  ganttBarStyle,
+  ganttHeaders,
+  ganttTimeline,
+  type GanttZoom,
+} from "../../utils/ganttLayout";
 
 const { Text } = Typography;
-
-const STATUS_COLORS: Record<string, string> = {
-  todo: "#d9d9d9",
-  doing: "#1677ff",
-  waiting: "#faad14",
-  review: "#ff7a45",
-  done: "#52c41a",
-};
 
 interface GanttViewProps {
   tasks: Task[];
 }
 
 export default function GanttView({ tasks: allTasks }: GanttViewProps) {
-  const [zoom, setZoom] = useState<"day" | "week" | "month">("week");
+  const [zoom, setZoom] = useState<GanttZoom>("week");
 
   const tasks = useMemo(
     () => allTasks.filter((t) => t.due_date || t.start_date).sort((a, b) => (a.start_date || a.created_at).localeCompare(b.start_date || b.created_at)),
     [allTasks]
   );
 
-  const now = new Date();
-  const viewDays = zoom === "day" ? 14 : zoom === "week" ? 56 : 120;
-  const startDate = new Date(now);
-  startDate.setDate(startDate.getDate() - 7);
-  const endDate = new Date(startDate);
-  endDate.setDate(endDate.getDate() + viewDays);
-
-  const totalDays = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
-  const dayWidth = zoom === "day" ? 40 : zoom === "week" ? 14 : 5;
-
-  const headers: { label: string; left: number; width: number }[] = [];
-  for (let i = 0; i < totalDays; i++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + i);
-    const label = zoom === "day"
-      ? `${d.getMonth() + 1}/${d.getDate()}`
-      : zoom === "week"
-        ? (d.getDay() === 1 ? `${d.getMonth() + 1}/${d.getDate()}` : "")
-        : (d.getDate() === 1 ? `${d.getFullYear()}/${d.getMonth() + 1}` : "");
-    headers.push({
-      label,
-      left: i * dayWidth,
-      width: dayWidth,
-    });
-  }
-
-  const getBarStyle = (task: Task) => {
-    const start = task.start_date ? new Date(task.start_date) : new Date(task.created_at);
-    const end = task.due_date ? new Date(task.due_date) : new Date(start);
-    if (!task.due_date) end.setDate(end.getDate() + 3);
-
-    const leftDays = Math.max(0, Math.ceil((start.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
-    const widthDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-
-    return {
-      left: leftDays * dayWidth,
-      width: Math.max(widthDays * dayWidth, 20),
-      background: STATUS_COLORS[task.status] || "#d9d9d9",
-    };
-  };
+  // 时间轴的锚点与尺度、每根条子的定位都在纯逻辑模块里（见 ../../utils/ganttLayout.ts），
+  // 那里有逐条断言钉住；这里只负责渲染。
+  //
+  // 刻意**不**做 useMemo：原实现每次渲染都重算锚点（`new Date()`），
+  // 缓存住反而会让视窗在应用长时间不切档位时"停住"。
+  const timeline = ganttTimeline(new Date(), zoom);
+  const headers = ganttHeaders(timeline, zoom);
 
   return (
     <div>
@@ -103,7 +69,7 @@ export default function GanttView({ tasks: allTasks }: GanttViewProps) {
                 gap: 6,
               }}
             >
-              <Tag color={STATUS_COLORS[t.status]} style={{ fontSize: 10, margin: 0 }}>
+              <Tag color={GANTT_STATUS_COLORS[t.status]} style={{ fontSize: 10, margin: 0 }}>
                 {t.status}
               </Tag>
               <Text ellipsis style={{ fontSize: 12 }}>{t.title}</Text>
@@ -143,7 +109,7 @@ export default function GanttView({ tasks: allTasks }: GanttViewProps) {
 
           {/* 任务条 */}
           {tasks.map((t) => {
-            const bar = getBarStyle(t);
+            const bar = ganttBarStyle(t, timeline);
             return (
               <div
                 key={t.id}

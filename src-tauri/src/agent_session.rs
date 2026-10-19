@@ -36,16 +36,26 @@ impl AgentSessionState {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             Err(_) => Persisted::default(),
         };
-        Self { inner: Mutex::new(inner), path }
+        Self {
+            inner: Mutex::new(inner),
+            path,
+        }
     }
 
     /// Load from an explicit path (used by tests and for non-default storage).
+    ///
+    /// 只被本文件的 `mod tests` 用到 ⇒ 标 `cfg(test)`，
+    /// 否则非测试构建会报「never used」。
+    #[cfg(test)]
     pub fn load_from(path: PathBuf) -> Self {
         let inner = match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             Err(_) => Persisted::default(),
         };
-        Self { inner: Mutex::new(inner), path }
+        Self {
+            inner: Mutex::new(inner),
+            path,
+        }
     }
 
     /// Look up (or create + persist) a proxy session for the given agent.
@@ -62,12 +72,16 @@ impl AgentSessionState {
 
     pub fn cli_type_for(&self, agent_id: &str) -> String {
         let g = self.inner.lock().expect("agent-session mutex poisoned");
-        g.cli_types.get(agent_id).cloned().unwrap_or_else(|| "claude-code".to_string())
+        g.cli_types
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_else(|| "claude-code".to_string())
     }
 
     pub fn set_cli_type(&self, agent_id: &str, cli_type: &str) {
         let mut g = self.inner.lock().expect("agent-session mutex poisoned");
-        g.cli_types.insert(agent_id.to_string(), cli_type.to_string());
+        g.cli_types
+            .insert(agent_id.to_string(), cli_type.to_string());
         save(&g, &self.path);
     }
 
@@ -78,7 +92,11 @@ impl AgentSessionState {
             .map(|(agent_id, session_id)| AgentSessionInfo {
                 agent_id: agent_id.clone(),
                 session_id: session_id.clone(),
-                cli_type: g.cli_types.get(agent_id).cloned().unwrap_or_else(|| "claude-code".to_string()),
+                cli_type: g
+                    .cli_types
+                    .get(agent_id)
+                    .cloned()
+                    .unwrap_or_else(|| "claude-code".to_string()),
             })
             .collect()
     }
@@ -102,7 +120,10 @@ pub async fn chat(
     cli_type: &str,
     messages: Vec<ChatMessage>,
 ) -> Result<String, String> {
-    let url = format!("{}/v1/chat/completions", proxy_url.unwrap_or(PROXY_DEFAULT_URL));
+    let url = format!(
+        "{}/v1/chat/completions",
+        proxy_url.unwrap_or(PROXY_DEFAULT_URL)
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -125,8 +146,12 @@ pub async fn chat(
     if !status.is_success() {
         return Err(format!("proxy returned HTTP {}: {}", status, raw));
     }
-    let parsed: ChatResponse = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse response: {e}; body={}", raw.chars().take(200).collect::<String>()))?;
+    let parsed: ChatResponse = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "parse response: {e}; body={}",
+            raw.chars().take(200).collect::<String>()
+        )
+    })?;
     Ok(parsed
         .choices
         .first()
@@ -238,10 +263,8 @@ mod tests {
             return;
         }
 
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-session-test-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agent-session-test-{}.json", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&tmp);
         let state = AgentSessionState::load_from(tmp.clone());
 
@@ -255,8 +278,14 @@ mod tests {
             &sid1,
             &cli_type,
             vec![
-                ChatMessage { role: "system".to_string(), content: "You are concise.".into() },
-                ChatMessage { role: "user".to_string(), content: "Remember the word PINEAPPLE. Just reply ACK.".into() },
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: "You are concise.".into(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "Remember the word PINEAPPLE. Just reply ACK.".into(),
+                },
             ],
         )
         .await
@@ -272,9 +301,10 @@ mod tests {
             None,
             &sid2,
             &cli_type,
-            vec![
-                ChatMessage { role: "user".to_string(), content: "What word did I ask you to remember? Just the word.".into() },
-            ],
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: "What word did I ask you to remember? Just the word.".into(),
+            }],
         )
         .await
         .expect("turn 2 chat should succeed");
@@ -332,15 +362,24 @@ pub async fn run_agent_turn_inner(
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     if !system_prompt.trim().is_empty() {
-        messages.push(ChatMessage { role: "system".to_string(), content: system_prompt });
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt,
+        });
     }
     if let Some(h) = history {
         messages.extend(h);
     }
-    messages.push(ChatMessage { role: "user".to_string(), content: user_message });
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: user_message,
+    });
 
     let reply = chat(None, &sid, &cli_type, messages).await?;
-    Ok(AgentTurnResult { session_id: sid, reply })
+    Ok(AgentTurnResult {
+        session_id: sid,
+        reply,
+    })
 }
 
 #[derive(Serialize)]

@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod models;
 mod storage;
+mod task_state;
 
 use std::sync::Mutex;
 use tauri::Manager;

@@ -30,10 +30,15 @@ pub fn spawn() -> Result<Child, String> {
     }
 
     let node = resolve_node().ok_or_else(|| "node executable not found in PATH".to_string())?;
-    let entry = resolve_entry()
-        .ok_or_else(|| "agent-proxy dist not built; run `npm run build` in agent-proxy/ first".to_string())?;
+    let entry = resolve_entry().ok_or_else(|| {
+        "agent-proxy dist not built; run `npm run build` in agent-proxy/ first".to_string()
+    })?;
 
-    eprintln!("[agent-proxy] launching: {} {}", node.display(), entry.display());
+    eprintln!(
+        "[agent-proxy] launching: {} {}",
+        node.display(),
+        entry.display()
+    );
 
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
@@ -178,7 +183,6 @@ fn resolve_node() -> Option<PathBuf> {
 
     // 3. nvm version dir — pick the highest version
     pick_highest_nvm_node(&PathBuf::from(home + "/.nvm/versions/node"))
-
         .or_else(|| Some(PathBuf::from("node")))
 }
 
@@ -202,9 +206,19 @@ impl VersionKey {
         // major 必须真的是数字，否则整个名字就不是版本目录。
         // minor / patch 缺省按 0：nvm 会有 `v20`、`v20.11` 这类名字，不该被丢掉。
         let major = parts.next().and_then(|s| s.parse::<u32>().ok())?;
-        let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-        let patch = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-        Some(VersionKey { major, minor, patch })
+        let minor = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let patch = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        Some(VersionKey {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -224,7 +238,8 @@ fn pick_highest_nvm_node(nvm_root: &std::path::Path) -> Option<PathBuf> {
             Some((VersionKey::parse(&name)?, e.path()))
         })
         .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    // 降序取最高版本 ⇒ 用 Reverse 包一层，比 sort_by(|a,b| b.0.cmp(&a.0)) 更直白
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
     for (_, dir) in candidates {
         let p = dir.join("bin").join("node");
         if p.is_file() {
@@ -294,7 +309,12 @@ mod tests {
         fn new(tag: &str) -> TempTree {
             let n = SEQ.fetch_add(1, Ordering::SeqCst);
             let mut p = std::env::temp_dir();
-            p.push(format!("zbb-worker-test-{}-{}-{}", tag, std::process::id(), n));
+            p.push(format!(
+                "zbb-worker-test-{}-{}-{}",
+                tag,
+                std::process::id(),
+                n
+            ));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).expect("建临时目录");
             TempTree { path: p }
@@ -344,7 +364,10 @@ mod tests {
             make_nvm_version(&t.path, v);
         }
         let want = t.path.join("v20.11.0").join("bin").join("node");
-        assert_eq!(pick_highest_nvm_node(&t.path).as_deref(), Some(want.as_path()));
+        assert_eq!(
+            pick_highest_nvm_node(&t.path).as_deref(),
+            Some(want.as_path())
+        );
     }
 
     /// 没有 `v` 前缀 / 不是版本号的名字（nvm 自己会放 `aliases`、`.cache`）
@@ -358,7 +381,10 @@ mod tests {
             std::fs::write(t.path.join(noise).join("bin").join("node"), b"x").unwrap();
         }
         let want = t.path.join("v21.0.0").join("bin").join("node");
-        assert_eq!(pick_highest_nvm_node(&t.path).as_deref(), Some(want.as_path()));
+        assert_eq!(
+            pick_highest_nvm_node(&t.path).as_deref(),
+            Some(want.as_path())
+        );
     }
 
     #[test]
@@ -377,7 +403,10 @@ mod tests {
     #[test]
     fn resolve_node_always_succeeds_via_bare_name_fallback() {
         let p = resolve_node();
-        assert!(p.is_some(), "末位兜底保证 Some；这不是 bug，但调用方别指望它是 None");
+        assert!(
+            p.is_some(),
+            "末位兜底保证 Some；这不是 bug，但调用方别指望它是 None"
+        );
     }
 
     /// P0-1：`agent-proxy` 不是终点，它自己会再拉起 claude / hermes / opencode。
@@ -494,7 +523,11 @@ mod tests {
     #[test]
     fn child_becomes_its_own_process_group_leader() {
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 0.2").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.arg("-c")
+            .arg("sleep 0.2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         put_in_own_process_group(&mut cmd);
         let mut child = cmd.spawn().expect("spawn");
         let pid = child.id() as libc::pid_t;
@@ -546,7 +579,10 @@ mod tests {
         }
 
         let mut child = spawn().expect("spawn");
-        assert!(is_port_in_use(DEFAULT_PORT), "port should be bound after spawn");
+        assert!(
+            is_port_in_use(DEFAULT_PORT),
+            "port should be bound after spawn"
+        );
 
         kill(&mut child);
         // Give the OS a moment to release the port.

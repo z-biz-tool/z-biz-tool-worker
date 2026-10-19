@@ -4,6 +4,12 @@ import { LeftOutlined, RightOutlined, PlusOutlined } from "@ant-design/icons";
 import type { Task } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
 import { useDraft } from "../../hooks/useDraft";
+import {
+  formatDateKey,
+  groupTasksByDueDate,
+  monthGrid,
+  shiftMonth,
+} from "../../utils/calendarLayout";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -30,29 +36,16 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
 
-  const firstDay = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  // 月边界（这个月几天、1 号是周几）都在纯逻辑模块里（见 ../../utils/calendarLayout.ts），
+  // 那里有逐条断言钉住；这里只负责渲染。
+  const days = useMemo(() => monthGrid(year, month), [year, month]);
 
-  const tasksByDate = useMemo(() => {
-    const map = new Map<string, Task[]>();
-    for (const t of tasks) {
-      if (t.due_date) {
-        const d = t.due_date.slice(0, 10);
-        if (!map.has(d)) map.set(d, []);
-        map.get(d)!.push(t);
-      }
-    }
-    return map;
-  }, [tasks]);
+  const tasksByDate = useMemo(() => groupTasksByDueDate(tasks), [tasks]);
 
   const today = new Date().toISOString().slice(0, 10);
 
-  const days: (number | null)[] = [];
-  for (let i = 0; i < firstDay; i++) days.push(null);
-  for (let i = 1; i <= daysInMonth; i++) days.push(i);
-
-  const prevMonth = () => setCurrentDate(new Date(year, month - 1, 1));
-  const nextMonth = () => setCurrentDate(new Date(year, month + 1, 1));
+  const prevMonth = () => setCurrentDate(shiftMonth(year, month, -1));
+  const nextMonth = () => setCurrentDate(shiftMonth(year, month, 1));
 
   const handleCreateTask = async () => {
     if (!newTaskForm.title.trim()) return message.warning("请输入任务标题");
@@ -66,7 +59,7 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
   };
 
   const openNewTask = (day: number) => {
-    const d = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const d = formatDateKey(year, month, day);
     setSelectedDate(d);
     setNewTaskOpen(true);
   };
@@ -92,7 +85,7 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
         ))}
         {days.map((day, i) => {
           if (day === null) return <div key={`empty-${i}`} style={{ minHeight: 100, background: "#fafafa" }} />;
-          const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+          const dateStr = formatDateKey(year, month, day);
           const dayTasks = tasksByDate.get(dateStr) || [];
           const isToday = dateStr === today;
           return (

@@ -2,9 +2,9 @@
 // Provides the same public API as before but delegates to db::Database.
 // A global `Database` instance is initialized on first access via `get_db()`.
 
-use std::sync::OnceLock;
 use crate::db::{self, Database};
 use crate::models::*;
+use std::sync::OnceLock;
 
 static DB: OnceLock<Database> = OnceLock::new();
 
@@ -27,10 +27,6 @@ pub fn save_project(project: &Project) {
 
 pub fn remove_project(id: &str) {
     db::remove_project(get_db(), id);
-}
-
-pub fn find_project(id: &str) -> Option<Project> {
-    db::find_project(get_db(), id)
 }
 
 pub fn rename_project(id: &str, name: &str, now: &str) -> Result<Project, String> {
@@ -69,6 +65,56 @@ pub fn remove_task(id: &str) {
 
 pub fn find_task(id: &str) -> Option<Task> {
     db::find_task(get_db(), id)
+}
+
+/// 条件认领任务（见 db::claim_task 的说明）。
+/// true = 认领成功；false = 任务已被别人领走。
+pub fn claim_task(
+    task_id: &str,
+    expected_status: &str,
+    agent_id: &str,
+    agent_name: &str,
+    now: &str,
+) -> Result<bool, String> {
+    db::claim_task(
+        get_db(),
+        task_id,
+        expected_status,
+        agent_id,
+        agent_name,
+        now,
+    )
+}
+
+/// 条件改派任务（见 db::reassign_task 的说明）。
+/// true = 改派成功；false = 该任务已不归 `old_agent_id`（中途被别人改派了）。
+pub fn reassign_task(
+    task_id: &str,
+    old_agent_id: &str,
+    new_agent_id: &str,
+    new_agent_name: &str,
+    now: &str,
+) -> Result<bool, String> {
+    db::reassign_task(
+        get_db(),
+        task_id,
+        old_agent_id,
+        new_agent_id,
+        new_agent_name,
+        now,
+    )
+}
+
+/// 释放任务上的 Agent 绑定（见 db::release_task_agent 的说明）。
+/// true = 更新到；false = 该任务已不归这个 Agent。
+pub fn release_task_agent(
+    task_id: &str,
+    agent_id: &str,
+    new_status: &str,
+    completed_at: Option<&str>,
+    now: &str,
+) -> Result<bool, String> {
+    db::release_task_agent(get_db(), task_id, agent_id, new_status, completed_at, now)
 }
 
 // ===== 消息 =====

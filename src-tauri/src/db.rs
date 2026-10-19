@@ -1,7 +1,7 @@
+use crate::models::*;
 use rusqlite::{params, Connection, Result as SqlResult};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use crate::models::*;
 
 const DB_NAME: &str = "data.db";
 const DATA_DIR_NAME: &str = ".z-biz-tool-worker";
@@ -18,7 +18,9 @@ impl Database {
         }
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.init_schema()?;
         Ok(db)
     }
@@ -30,10 +32,6 @@ impl Database {
 
     pub fn db_path() -> PathBuf {
         Self::data_dir().join(DB_NAME)
-    }
-
-    pub fn data_dir_path() -> PathBuf {
-        Self::data_dir()
     }
 
     fn init_schema(&self) -> SqlResult<()> {
@@ -146,7 +144,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
         Ok(())
     }
@@ -269,7 +267,9 @@ impl Database {
                         if name.ends_with(".json") {
                             let _task_id = name.trim_end_matches(".json");
                             if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                                if let Ok(messages) = serde_json::from_str::<Vec<TaskMessage>>(&content) {
+                                if let Ok(messages) =
+                                    serde_json::from_str::<Vec<TaskMessage>>(&content)
+                                {
                                     for m in &messages {
                                         let _ = conn.execute(
                                             "INSERT OR IGNORE INTO task_messages (id, task_id, role, content, created_at)
@@ -327,7 +327,15 @@ pub fn save_project(db: &Database, project: &Project) {
            color = excluded.color,
            created_at = excluded.created_at,
            updated_at = excluded.updated_at",
-        params![project.id, project.name, project.description, project.icon, project.color, project.created_at, project.updated_at],
+        params![
+            project.id,
+            project.name,
+            project.description,
+            project.icon,
+            project.color,
+            project.created_at,
+            project.updated_at
+        ],
     );
 }
 
@@ -383,9 +391,11 @@ pub fn find_project(db: &Database, id: &str) -> Option<Project> {
 pub fn read_agents_by_project(db: &Database, project_id: &str) -> Vec<Agent> {
     let conn = db.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, project_id, name, system_prompt, model, status, current_task_id,
+        .prepare(
+            "SELECT id, project_id, name, system_prompt, model, status, current_task_id,
                   source, cli_type, local_agent_id, cli_version, cli_path, created_at, last_used_at
-                  FROM agents WHERE project_id = ?1 ORDER BY created_at")
+                  FROM agents WHERE project_id = ?1 ORDER BY created_at",
+        )
         .unwrap();
     stmt.query_map(params![project_id], |row| {
         Ok(Agent {
@@ -461,11 +471,13 @@ pub fn find_agent(db: &Database, id: &str) -> Option<Agent> {
 pub fn read_tasks_by_project(db: &Database, project_id: &str) -> Vec<Task> {
     let conn = db.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, project_id, parent_id, title, description, status, priority,
+        .prepare(
+            "SELECT id, project_id, parent_id, title, description, status, priority,
                   start_date, due_date, milestone, assigned_agent_id, assigned_agent_name,
                   children, output, agent_output, waiting_for_input, receipts, custom_fields,
                   tags, sort_order, created_at, updated_at, completed_at
-                  FROM tasks WHERE project_id = ?1 ORDER BY sort_order, created_at")
+                  FROM tasks WHERE project_id = ?1 ORDER BY sort_order, created_at",
+        )
         .unwrap();
     stmt.query_map(params![project_id], |row| {
         let children_str: String = row.get(12)?;
@@ -473,7 +485,8 @@ pub fn read_tasks_by_project(db: &Database, project_id: &str) -> Vec<Task> {
         let receipts_str: Option<String> = row.get(16)?;
         let receipts = receipts_str.and_then(|s| serde_json::from_str(&s).ok());
         let custom_fields_str: String = row.get(17)?;
-        let custom_fields: serde_json::Value = serde_json::from_str(&custom_fields_str).unwrap_or(serde_json::json!({}));
+        let custom_fields: serde_json::Value =
+            serde_json::from_str(&custom_fields_str).unwrap_or(serde_json::json!({}));
         let tags_str: String = row.get(18)?;
         let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
         let milestone_int: i32 = row.get(9)?;
@@ -557,11 +570,123 @@ pub fn save_task(db: &Database, task: &Task) {
     );
 }
 
+/// **条件认领**任务：只在任务仍处于 `expected_status` 且尚未被分配时才算成功。
+///
+/// 存在的理由（01 B3「并发领取竞态」）：
+/// `assign_task` 原来是「find_task → 改内存 → save_task」三步，
+/// 而 `save_task` 是**无条件 upsert**（`ON CONFLICT DO UPDATE` 不带 WHERE）。
+/// 两次调用之间 find 与 save 各自持锁、中间有窗口 ⇒ 两个 Agent 同时领同一个
+/// 任务时，**后写的覆盖先写的**，先写的那个 Agent 已经在跑 LLM，
+/// 但任务归属已经被改掉了 —— 谁也不知道任务到底归谁。
+///
+/// 这里把「检查」与「写入」合成**一条 SQL**：
+/// `UPDATE ... WHERE id = ? AND status = ? AND assigned_agent_id IS NULL`
+/// —— affected_rows 为 0 就说明条件已经不成立（被别人抢走了 / 状态变了），
+/// 调用方据此报错，而不是默默覆盖。
+///
+/// 返回值：true = 认领成功；false = 条件不成立（任务已被别人领走）。
+pub fn claim_task(
+    db: &Database,
+    task_id: &str,
+    expected_status: &str,
+    agent_id: &str,
+    agent_name: &str,
+    now: &str,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().unwrap();
+    let affected = conn
+        .execute(
+            "UPDATE tasks
+                SET status = 'doing',
+                    assigned_agent_id = ?2,
+                    assigned_agent_name = ?3,
+                    updated_at = ?4
+              WHERE id = ?1
+                AND status = ?5
+                AND assigned_agent_id IS NULL",
+            params![task_id, agent_id, agent_name, now, expected_status],
+        )
+        .map_err(|e| format!("认领任务失败: {}", e))?;
+    Ok(affected > 0)
+}
+
+/// **条件改派**：把任务从 `old_agent_id` 改到 `new_agent_id`。
+///
+/// 与 `claim_task` 分成两条路，是因为两者面对的是**不同的语义**：
+///
+/// - `claim_task` = 「抢一个还没人领的任务」。两个 Agent 同时抢时**只允许一个赢家**，
+///   另一个必须明确失败（不然就是 B3 那个竞态：后写的覆盖先写的，
+///   先写的那个 Agent 已经在跑 LLM，但任务归属被改掉了）。
+/// - `reassign_task` = 「用户显式把任务改派给另一个 Agent」（任务详情面板的 Agent 下拉框）。
+///   这是**人的意图**，不是竞态 —— 后写覆盖先写是应有之义。
+///
+/// 但**仍然带条件**（`WHERE id = ? AND assigned_agent_id = ?old`）：
+/// 若在「读」与「写」之间任务已被改派给别人，就不覆盖、如实报错，
+/// 免得把别人的绑定顶掉。
+///
+/// 返回值：true = 改派成功；false = 条件不成立（中途已被别人改派）。
+pub fn reassign_task(
+    db: &Database,
+    task_id: &str,
+    old_agent_id: &str,
+    new_agent_id: &str,
+    new_agent_name: &str,
+    now: &str,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().unwrap();
+    let affected = conn
+        .execute(
+            "UPDATE tasks
+                SET status = 'doing',
+                    assigned_agent_id = ?3,
+                    assigned_agent_name = ?4,
+                    updated_at = ?5
+              WHERE id = ?1
+                AND assigned_agent_id = ?2",
+            params![task_id, old_agent_id, new_agent_id, new_agent_name, now],
+        )
+        .map_err(|e| format!("改派任务失败: {}", e))?;
+    Ok(affected > 0)
+}
+
+/// 释放任务上的 Agent 绑定，并把任务状态改到 `new_status`。
+///
+/// 与 `claim_task` 成对：**条件更新**（`WHERE id = ? AND assigned_agent_id = ?`），
+/// 避免"释放 A 的任务"与"把任务改派给 B"交错时把 B 的绑定一起清掉。
+///
+/// 返回值：true = 更新到；false = 该任务已不归这个 Agent（说明中途被改派了）。
+pub fn release_task_agent(
+    db: &Database,
+    task_id: &str,
+    agent_id: &str,
+    new_status: &str,
+    completed_at: Option<&str>,
+    now: &str,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().unwrap();
+    let affected = conn
+        .execute(
+            "UPDATE tasks
+                SET assigned_agent_id = NULL,
+                    assigned_agent_name = NULL,
+                    status = ?2,
+                    completed_at = COALESCE(?3, completed_at),
+                    updated_at = ?4
+              WHERE id = ?1
+                AND assigned_agent_id = ?5",
+            params![task_id, new_status, completed_at, now, agent_id],
+        )
+        .map_err(|e| format!("释放任务失败: {}", e))?;
+    Ok(affected > 0)
+}
+
 pub fn remove_task(db: &Database, id: &str) {
     let conn = db.conn.lock().unwrap();
     // 删除子任务
     let child_ids: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT id FROM tasks WHERE parent_id = ?1").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM tasks WHERE parent_id = ?1")
+            .unwrap();
         stmt.query_map(params![id], |row| row.get(0))
             .unwrap()
             .filter_map(|r| r.ok())
@@ -588,7 +713,8 @@ pub fn find_task(db: &Database, id: &str) -> Option<Task> {
             let receipts_str: Option<String> = row.get(16)?;
             let receipts = receipts_str.and_then(|s| serde_json::from_str(&s).ok());
             let custom_fields_str: String = row.get(17)?;
-            let custom_fields: serde_json::Value = serde_json::from_str(&custom_fields_str).unwrap_or(serde_json::json!({}));
+            let custom_fields: serde_json::Value =
+                serde_json::from_str(&custom_fields_str).unwrap_or(serde_json::json!({}));
             let tags_str: String = row.get(18)?;
             let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
             let milestone_int: i32 = row.get(9)?;
@@ -720,7 +846,10 @@ pub fn get_task_dependencies(db: &Database, task_id: &str) -> Vec<String> {
 
 pub fn set_task_dependencies(db: &Database, task_id: &str, depends_on: &[String]) {
     let conn = db.conn.lock().unwrap();
-    let _ = conn.execute("DELETE FROM task_dependencies WHERE task_id = ?1", params![task_id]);
+    let _ = conn.execute(
+        "DELETE FROM task_dependencies WHERE task_id = ?1",
+        params![task_id],
+    );
     for dep_id in depends_on {
         let _ = conn.execute(
             "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?1, ?2)",
@@ -733,8 +862,10 @@ pub fn set_task_dependencies(db: &Database, task_id: &str, depends_on: &[String]
 pub fn read_documents_by_project(db: &Database, project_id: &str) -> Vec<ProjectDocument> {
     let conn = db.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, project_id, title, content, parent_id, sort_order, created_at, updated_at
-                  FROM project_documents WHERE project_id = ?1 ORDER BY sort_order, created_at")
+        .prepare(
+            "SELECT id, project_id, title, content, parent_id, sort_order, created_at, updated_at
+                  FROM project_documents WHERE project_id = ?1 ORDER BY sort_order, created_at",
+        )
         .unwrap();
     stmt.query_map(params![project_id], |row| {
         Ok(ProjectDocument {
@@ -793,14 +924,18 @@ pub fn find_document(db: &Database, id: &str) -> Option<ProjectDocument> {
 pub fn get_project_stats(db: &Database, project_id: &str) -> ProjectStats {
     let conn = db.conn.lock().unwrap();
     let tasks: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT status FROM tasks WHERE project_id = ?1").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT status FROM tasks WHERE project_id = ?1")
+            .unwrap();
         stmt.query_map(params![project_id], |row| row.get(0))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect()
     };
     let agents: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT status FROM agents WHERE project_id = ?1").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT status FROM agents WHERE project_id = ?1")
+            .unwrap();
         stmt.query_map(params![project_id], |row| row.get(0))
             .unwrap()
             .filter_map(|r| r.ok())
@@ -831,8 +966,11 @@ mod tests {
 
     fn memory_db() -> Database {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
-        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
-        let db = Database { conn: Mutex::new(conn) };
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("pragma");
+        let db = Database {
+            conn: Mutex::new(conn),
+        };
         db.init_schema().expect("schema");
         db
     }
@@ -949,13 +1087,364 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(count("SELECT COUNT(*) FROM task_messages WHERE task_id='t1'"), 1);
-        assert_eq!(count("SELECT COUNT(*) FROM task_attachments WHERE task_id='t1'"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM task_messages WHERE task_id='t1'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM task_attachments WHERE task_id='t1'"),
+            1
+        );
         assert_eq!(count("SELECT COUNT(*) FROM tasks WHERE parent_id='t1'"), 1);
         drop(conn);
 
         let saved = find_task(&db, "t1").expect("t1 survives its own save");
         assert_eq!(saved.status, "doing");
         assert_eq!(saved.created_at, "2026-01-01T00:00:00Z");
+    }
+
+    // ===== 01 B3：并发领取竞态 =====
+    //
+    // 原来的 assign_task 是「find → 改内存 → save」三步，而 save_task 是
+    // **无条件 upsert** ⇒ 两个 Agent 同时领同一个任务时，后写的覆盖先写的。
+    // 现在认领走一条带 WHERE 的 UPDATE，条件不成立就明确失败。
+
+    /// 造一条带指定状态与分配情况的任务
+    fn insert_task_with(
+        db: &Database,
+        id: &str,
+        project_id: &str,
+        status: &str,
+        assigned_agent_id: Option<&str>,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, project_id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, project_id, format!("task {}", id), status, assigned_agent_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn claim_task_succeeds_only_once() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "todo", None);
+
+        let first = claim_task(&db, "t1", "todo", "agent-a", "A", "2026-02-02T00:00:00Z").unwrap();
+        assert!(first, "第一个认领应当成功");
+
+        // 第二个 Agent 来领同一个任务：条件已不成立（assigned_agent_id 不再为 NULL）
+        let second = claim_task(&db, "t1", "todo", "agent-b", "B", "2026-02-02T00:01:00Z").unwrap();
+        assert!(!second, "第二个认领必须失败 —— 这就是竞态修复点");
+
+        // 且任务归属必须是**第一个**认领者，不能被后者覆盖
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.assigned_agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(task.assigned_agent_name.as_deref(), Some("A"));
+        assert_eq!(task.status, "doing");
+    }
+
+    #[test]
+    fn claim_task_fails_when_status_changed() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "todo", None);
+
+        // 任务在"读状态"与"认领"之间被别人改成了 review
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE tasks SET status = 'review' WHERE id = 't1'", [])
+                .unwrap();
+        }
+
+        let claimed = claim_task(
+            &db,
+            "t1",
+            "todo", // 认领方以为自己读到的是 todo
+            "agent-a",
+            "A",
+            "2026-02-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(!claimed, "状态已变时认领必须失败");
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.status, "review", "不能把状态改回去");
+        assert!(task.assigned_agent_id.is_none());
+    }
+
+    #[test]
+    fn claim_task_does_not_touch_other_fields() {
+        // 认领走的是**定点 UPDATE**，不是整行 upsert ——
+        // 所以它不会把读-改-写窗口里别人改的其它字段一起覆盖掉。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "todo", None);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET title = '别人改的标题', priority = 3 WHERE id = 't1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        claim_task(&db, "t1", "todo", "agent-a", "A", "2026-02-02T00:00:00Z").unwrap();
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.title, "别人改的标题", "认领不该覆盖别人改的标题");
+        assert_eq!(task.priority, 3, "认领不该覆盖别人改的优先级");
+        assert_eq!(task.assigned_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn release_task_agent_clears_binding_and_sets_status() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-a"));
+
+        let released = release_task_agent(
+            &db,
+            "t1",
+            "agent-a",
+            "done",
+            Some("2026-02-02T00:00:00Z"),
+            "2026-02-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(released);
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert!(task.assigned_agent_id.is_none(), "释放后不该还挂着 Agent");
+        assert!(task.assigned_agent_name.is_none());
+        assert_eq!(task.status, "done");
+        assert_eq!(task.completed_at.as_deref(), Some("2026-02-02T00:00:00Z"));
+    }
+
+    #[test]
+    fn release_task_agent_does_not_clear_another_agents_binding() {
+        // 中途被改派给别人时，释放"旧 Agent"不能把新 Agent 的绑定清掉。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-b"));
+
+        let released = release_task_agent(
+            &db,
+            "t1",
+            "agent-a", // 要释放的是 A，但任务已经归 B
+            "done",
+            Some("2026-02-02T00:00:00Z"),
+            "2026-02-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(!released, "任务已不归该 Agent 时不该改它");
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(
+            task.assigned_agent_id.as_deref(),
+            Some("agent-b"),
+            "B 的绑定必须保住"
+        );
+        assert_eq!(task.status, "doing", "状态也不该被改");
+    }
+
+    // ===== 改派（用户显式换 Agent）=====
+
+    #[test]
+    fn reassign_task_moves_binding_to_new_agent() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-a"));
+
+        let ok =
+            reassign_task(&db, "t1", "agent-a", "agent-b", "B", "2026-02-02T00:00:00Z").unwrap();
+        assert!(ok);
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.assigned_agent_id.as_deref(), Some("agent-b"));
+        assert_eq!(task.assigned_agent_name.as_deref(), Some("B"));
+        assert_eq!(task.status, "doing", "改派后任务应当进入 doing");
+    }
+
+    #[test]
+    fn reassign_task_fails_when_old_binding_is_gone() {
+        // 读完之后、写入之前，任务被别人改派了 ⇒ 本次改派必须失败，
+        // 绝不能把"新的那个 Agent"顶掉。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-a"));
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET assigned_agent_id = 'agent-c', assigned_agent_name = 'C' WHERE id = 't1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let ok = reassign_task(
+            &db,
+            "t1",
+            "agent-a", // 我们以为还归 A
+            "agent-b",
+            "B",
+            "2026-02-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(!ok, "旧绑定已变时改派必须失败");
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(
+            task.assigned_agent_id.as_deref(),
+            Some("agent-c"),
+            "C 的绑定必须保住"
+        );
+    }
+
+    #[test]
+    fn claim_task_refuses_task_already_owned_by_someone_else() {
+        // 已经归 A 的任务，B 不能"抢"走（claim 的语义是领**没人领**的）。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-a"));
+
+        let ok = claim_task(&db, "t1", "doing", "agent-b", "B", "2026-02-02T00:00:00Z").unwrap();
+        assert!(!ok, "已归属的任务不能被别人 claim 走");
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.assigned_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn released_task_can_be_claimed_again() {
+        // 闭环：验收不通过 ⇒ 任务回到 todo 且**解除了绑定** ⇒ 之后能被别人重新领走。
+        // 如果释放时不清绑定，这条会红 —— 而且产品上就是死局：
+        // 任务回到 todo 却谁都领不走。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "review", Some("agent-a"));
+
+        let released =
+            release_task_agent(&db, "t1", "agent-a", "todo", None, "2026-02-02T00:00:00Z").unwrap();
+        assert!(released);
+
+        let claimed =
+            claim_task(&db, "t1", "todo", "agent-b", "B", "2026-02-03T00:00:00Z").unwrap();
+        assert!(claimed, "释放后的任务应当能被重新领取");
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.assigned_agent_id.as_deref(), Some("agent-b"));
+        assert_eq!(task.status, "doing");
+    }
+
+    /// 插入一个指定状态的 Agent
+    fn insert_agent_with(db: &Database, id: &str, project_id: &str, status: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, project_id, name, system_prompt, model, status, created_at, last_used_at)
+             VALUES (?1, ?2, ?3, '', 'default', ?4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, project_id, format!("agent {}", id), status],
+        )
+        .unwrap();
+    }
+
+    // ===== 项目统计（收敛成唯一实现后锁住口径）=====
+
+    #[test]
+    fn get_project_stats_counts_task_statuses() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "todo", None);
+        insert_task_with(&db, "t2", "p1", "doing", None);
+        insert_task_with(&db, "t3", "p1", "doing", None);
+        insert_task_with(&db, "t4", "p1", "waiting", None);
+        insert_task_with(&db, "t5", "p1", "review", None);
+        insert_task_with(&db, "t6", "p1", "done", None);
+
+        let stats = get_project_stats(&db, "p1");
+        assert_eq!(stats.tasks.total, 6);
+        assert_eq!(stats.tasks.todo, 1);
+        assert_eq!(stats.tasks.doing, 2);
+        assert_eq!(stats.tasks.waiting, 1);
+        assert_eq!(stats.tasks.review, 1);
+        assert_eq!(stats.tasks.done, 1);
+    }
+
+    #[test]
+    fn get_project_stats_only_counts_the_given_project() {
+        // 统计必须**按 project 过滤** —— 漏了这一条，
+        // 项目面板就会把别的项目的任务算进来。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目一");
+        insert_project(&db, "p2", "项目二");
+        insert_task_with(&db, "t1", "p1", "todo", None);
+        insert_task_with(&db, "t2", "p2", "doing", None);
+        insert_task_with(&db, "t3", "p2", "done", None);
+
+        let stats = get_project_stats(&db, "p1");
+        assert_eq!(stats.tasks.total, 1);
+        assert_eq!(stats.tasks.todo, 1);
+        assert_eq!(stats.tasks.doing, 0);
+        assert_eq!(stats.tasks.done, 0);
+    }
+
+    #[test]
+    fn get_project_stats_counts_agent_statuses() {
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_project(&db, "p2", "别的项目");
+        insert_agent_with(&db, "a1", "p1", "working");
+        insert_agent_with(&db, "a2", "p1", "idle");
+        insert_agent_with(&db, "a3", "p1", "offline");
+        insert_agent_with(&db, "a4", "p2", "working"); // 别的项目
+
+        let stats = get_project_stats(&db, "p1");
+        assert_eq!(stats.agents.total, 3);
+        assert_eq!(stats.agents.working, 1);
+        assert_eq!(stats.agents.idle, 1);
+        assert_eq!(stats.agents.offline, 1);
+    }
+
+    #[test]
+    fn get_project_stats_of_empty_project_is_all_zero() {
+        let db = memory_db();
+        insert_project(&db, "p1", "空项目");
+        let stats = get_project_stats(&db, "p1");
+        assert_eq!(stats.tasks.total, 0);
+        assert_eq!(stats.agents.total, 0);
+    }
+
+    #[test]
+    fn release_task_agent_keeps_other_columns_intact() {
+        // 释放是**定点 UPDATE**，不能像整行 upsert 那样把别的列覆盖回旧值。
+        let db = memory_db();
+        insert_project(&db, "p1", "项目");
+        insert_task_with(&db, "t1", "p1", "doing", Some("agent-a"));
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET title = '改过的标题', output = '已有的产出' WHERE id = 't1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        release_task_agent(
+            &db,
+            "t1",
+            "agent-a",
+            "done",
+            Some("2026-02-02T00:00:00Z"),
+            "2026-02-02T00:00:00Z",
+        )
+        .unwrap();
+
+        let task = find_task(&db, "t1").expect("t1");
+        assert_eq!(task.title, "改过的标题", "释放不该回退标题");
+        assert_eq!(
+            task.output.as_deref(),
+            Some("已有的产出"),
+            "释放不该清掉产出"
+        );
     }
 }

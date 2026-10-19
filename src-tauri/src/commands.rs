@@ -1,6 +1,7 @@
 use crate::agent_runner;
 use crate::models::*;
 use crate::storage;
+use crate::task_state;
 use chrono::Utc;
 
 const DEFAULT_AGENT_PROXY_URL: &str = "http://127.0.0.1:9099";
@@ -52,29 +53,14 @@ pub fn rename_project(id: String, name: String) -> Result<Project, String> {
 
 #[tauri::command]
 pub fn get_project_stats(id: String) -> Result<ProjectStats, String> {
-    let tasks = storage::read_tasks_by_project(&id);
-    let agents = storage::read_agents_by_project(&id);
-
-    let task_stats = TaskStats {
-        total: tasks.len() as i32,
-        todo: tasks.iter().filter(|t| t.status == "todo").count() as i32,
-        doing: tasks.iter().filter(|t| t.status == "doing").count() as i32,
-        waiting: tasks.iter().filter(|t| t.status == "waiting").count() as i32,
-        review: tasks.iter().filter(|t| t.status == "review").count() as i32,
-        done: tasks.iter().filter(|t| t.status == "done").count() as i32,
-    };
-
-    let agent_stats = AgentStats {
-        total: agents.len() as i32,
-        working: agents.iter().filter(|a| a.status == "working").count() as i32,
-        idle: agents.iter().filter(|a| a.status == "idle").count() as i32,
-        offline: agents.iter().filter(|a| a.status == "offline").count() as i32,
-    };
-
-    Ok(ProjectStats {
-        tasks: task_stats,
-        agents: agent_stats,
-    })
+    // 统计口径**只有一份**：db::get_project_stats。
+    //
+    // 原先这里另写了一遍（在 Rust 侧把该项目的任务/Agent 全读出来再 filter），
+    // 与 db 层那版（SQL 侧只取 status 列）**是同一套规则的两份实现** ——
+    // 正是「同一套规则前后端各写一遍必然漂移」的形态：
+    // 一份改字段名，另一份不会跟着改，数字对不上时没人知道该信哪个。
+    // 现在统一走 db 层那份（顺带少读一堆整行）。
+    Ok(storage::get_project_stats(&id))
 }
 
 // ===== Agent命令 =====
@@ -99,7 +85,11 @@ pub fn discover_local_agents() -> Vec<LocalAgentInfo> {
             let reader = resp.into_reader();
             match serde_json::from_reader::<_, serde_json::Value>(reader) {
                 Ok(v) => {
-                    let arr = v.get("cli_agents").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    let arr = v
+                        .get("cli_agents")
+                        .and_then(|x| x.as_array())
+                        .cloned()
+                        .unwrap_or_default();
                     arr.into_iter()
                         .filter_map(|item| serde_json::from_value::<LocalAgentInfo>(item).ok())
                         .collect()
@@ -126,8 +116,16 @@ pub fn create_agent(project_id: String, name: String, prompt: String, model: Str
         id: uuid::Uuid::new_v4().to_string(),
         project_id,
         name,
-        system_prompt: if prompt.is_empty() { "你是一个有用的AI助手。".to_string() } else { prompt },
-        model: if model.is_empty() { "default".to_string() } else { model },
+        system_prompt: if prompt.is_empty() {
+            "你是一个有用的AI助手。".to_string()
+        } else {
+            prompt
+        },
+        model: if model.is_empty() {
+            "default".to_string()
+        } else {
+            model
+        },
         status: "idle".to_string(),
         current_task_id: None,
         source: "manual".to_string(),
@@ -203,7 +201,11 @@ pub fn clone_agent(project_id: String, source_id: String, name: String) -> Resul
     let agent = Agent {
         id: uuid::Uuid::new_v4().to_string(),
         project_id,
-        name: if name.is_empty() { format!("{} (副本)", source.name) } else { name },
+        name: if name.is_empty() {
+            format!("{} (副本)", source.name)
+        } else {
+            name
+        },
         system_prompt: source.system_prompt,
         model: source.model,
         status: "idle".to_string(),
@@ -228,7 +230,12 @@ pub fn list_tasks(project_id: String) -> Vec<Task> {
 }
 
 #[tauri::command]
-pub fn create_task(project_id: String, title: String, desc: String, parent_id: Option<String>) -> Task {
+pub fn create_task(
+    project_id: String,
+    title: String,
+    desc: String,
+    parent_id: Option<String>,
+) -> Task {
     let now = Utc::now().to_rfc3339();
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
@@ -285,13 +292,51 @@ pub fn delete_task(id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
-    let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let agent = storage::find_agent(&agent_id).ok_or("Agent不存在")?;
+    let task = storage::find_task(&task_id).ok_or("任务不存在")?;
+    let now = Utc::now().to_rfc3339();
 
-    task.assigned_agent_id = Some(agent_id.clone());
-    task.assigned_agent_name = Some(agent.name.clone());
-    task.status = "doing".to_string();
-    task.updated_at = Utc::now().to_rfc3339();
+    // 01 B3「并发领取竞态」：原来是「find → 改内存 → save」三步，
+    // 而 save_task 是无条件 upsert ⇒ 两个 Agent 同时领同一个任务时，
+    // 后写的覆盖先写的，先写的那个 Agent 已经在跑 LLM 但任务归属已被改掉。
+    //
+    // 现在分两条**带 WHERE 的 UPDATE**：
+    // - 任务**还没人领** ⇒ claim（抢单）：`assigned_agent_id IS NULL` 才算成功，
+    //   两个 Agent 同时抢只有一个赢家，另一个明确失败，不默默覆盖。
+    // - 任务**已经归别人** ⇒ reassign（用户显式改派）：`assigned_agent_id = 旧值` 才算成功，
+    //   中途被别人改派过就失败，不把别人的绑定顶掉。
+    // 两条都不是「无条件整行写」，所以也不会把窗口期里别人改的别的字段覆盖回去。
+    let claimed = match task.assigned_agent_id.as_deref() {
+        None => storage::claim_task(&task_id, &task.status, &agent_id, &agent.name, &now)?,
+        Some(old_agent_id) => {
+            storage::reassign_task(&task_id, old_agent_id, &agent_id, &agent.name, &now)?
+        }
+    };
+    if !claimed {
+        return Err(match task.assigned_agent_id.as_deref() {
+            None => "任务已被其他 Agent 认领，请刷新后重试".to_string(),
+            Some(_) => "任务的分配已发生变化（可能已被改派给别人），请刷新后重试".to_string(),
+        });
+    }
+
+    // 改派时把**旧 Agent** 放回空闲。
+    //
+    // 原实现没有这一步：改派只改了任务上的绑定，旧 Agent 的 status 仍停在
+    // "working"、current_task_id 仍指着这个已经不属于它的任务 ⇒
+    // 那个 Agent 永远显示"工作中"，也不会去接别的活。
+    // 只在旧 Agent **确实在跑这个任务**时才放它空闲（current_task_id 对得上），
+    // 免得误伤正在干别的活的 Agent。
+    if let Some(old_agent_id) = task.assigned_agent_id.as_deref() {
+        if old_agent_id != agent_id {
+            if let Some(mut old_agent) = storage::find_agent(old_agent_id) {
+                if old_agent.current_task_id.as_deref() == Some(task_id.as_str()) {
+                    old_agent.status = "idle".to_string();
+                    old_agent.current_task_id = None;
+                    storage::save_agent(&old_agent);
+                }
+            }
+        }
+    }
 
     // 更新Agent状态
     let mut agent = agent;
@@ -300,7 +345,8 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
     agent.last_used_at = Utc::now().to_rfc3339();
     storage::save_agent(&agent);
 
-    storage::save_task(&task);
+    // 重新读回，落库后的实际状态
+    let task = storage::find_task(&task_id).ok_or("任务不存在")?;
 
     // 后台触发 agent-proxy 真实执行。task 已经持久化为 doing,
     // 即使后台失败,任务也不会卡死:失败时改 waiting + 写错误到 output。
@@ -312,7 +358,12 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
         task.title, task.description
     );
     std::thread::spawn(move || {
-        run_task_background(&task_id_bg, &agent_id_bg, cli_type_bg.as_deref(), &prompt_bg);
+        run_task_background(
+            &task_id_bg,
+            &agent_id_bg,
+            cli_type_bg.as_deref(),
+            &prompt_bg,
+        );
     });
 
     Ok(task)
@@ -341,7 +392,12 @@ pub fn retry_task(task_id: String) -> Result<Task, String> {
         task.title, task.description
     );
     std::thread::spawn(move || {
-        run_task_background(&task_id_bg, &agent_id_bg, cli_type_bg.as_deref(), &prompt_bg);
+        run_task_background(
+            &task_id_bg,
+            &agent_id_bg,
+            cli_type_bg.as_deref(),
+            &prompt_bg,
+        );
     });
     Ok(task)
 }
@@ -350,7 +406,10 @@ pub fn retry_task(task_id: String) -> Result<Task, String> {
 /// cli_type 为 None(手填 agent)时不调 LLM,直接停在 doing 等用户手动操作。
 fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, prompt: &str) {
     let Some(cli_type) = cli_type else {
-        eprintln!("[run_task_background] agent {} 非本地 CLI,跳过执行", agent_id);
+        eprintln!(
+            "[run_task_background] agent {} 非本地 CLI,跳过执行",
+            agent_id
+        );
         return;
     };
     match agent_runner::run_agent(cli_type, prompt) {
@@ -370,7 +429,10 @@ fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, pr
             }
         }
         Err(e) => {
-            eprintln!("[run_task_background] task {} agent-proxy 执行失败: {}", task_id, e);
+            eprintln!(
+                "[run_task_background] task {} agent-proxy 执行失败: {}",
+                task_id, e
+            );
             if let Some(mut t) = storage::find_task(task_id) {
                 t.status = "waiting".to_string();
                 t.output = Some(format!("[执行失败,点「重试」再来一次]\n\n{}", e));
@@ -390,52 +452,106 @@ fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, pr
 /// 切到 done 时同时设置 completed_at;doing 时如果原来有 assigned_agent,会保留分配。
 #[tauri::command]
 pub fn update_task_status(task_id: String, status: String) -> Result<Task, String> {
-    let valid = ["todo", "doing", "waiting", "review", "done"];
-    if !valid.contains(&status.as_str()) {
-        return Err(format!("非法状态: {}", status));
-    }
+    // 状态白名单与"要不要盖完成时间 / 要不要释放 Agent"的规则都在 task_state 里，
+    // 那里有逐条单测（01 B2「状态流转零测试」）。
+    task_state::validate_status(&status)?;
+    let plan = task_state::plan_status_update(&status);
+
     let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let now = Utc::now().to_rfc3339();
     task.status = status.clone();
     task.updated_at = now.clone();
-    if status == "done" {
-        task.completed_at = Some(now);
+    if plan.stamp_completed_at {
+        task.completed_at = Some(now.clone());
         // 释放 Agent
-        if let Some(agent_id) = &task.assigned_agent_id {
-            if let Some(mut agent) = storage::find_agent(agent_id) {
+        //
+        // 顺带修掉一个真实的字段不一致：原来只把 Agent 置回 idle、
+        // 却**没清 task.assigned_agent_id** ⇒ 任务已经完成，
+        // 界面上却还显示"已分配给某某"，而那个 Agent 已经是空闲状态。
+        // 看板（KanbanView）与任务详情（TaskDetailPanel）都读这个字段。
+        if let Some(agent_id) = task.assigned_agent_id.clone() {
+            if let Some(mut agent) = storage::find_agent(&agent_id) {
                 agent.status = "idle".to_string();
                 agent.current_task_id = None;
                 storage::save_agent(&agent);
             }
         }
     }
+    // 先把状态落盘
     storage::save_task(&task);
+
+    // **再**释放任务上的 Agent 绑定。
+    //
+    // 顺序不能反：save_task 是整行 upsert，写的是内存里那份 task
+    // （此时 assigned_agent_id 还指着旧 Agent）—— 如果先释放再 save_task，
+    // 那次 upsert 会把刚清掉的绑定**原样写回去**，等于什么都没做。
+    //
+    // 放在最后还有个好处：release_task_agent 是**条件更新**
+    //（`WHERE id = ? AND assigned_agent_id = ?`），中途若任务已被改派给别人，
+    // 它不会把别人的绑定清掉。
+    if plan.release_agent {
+        if let Some(agent_id) = task.assigned_agent_id.clone() {
+            storage::release_task_agent(
+                &task_id,
+                &agent_id,
+                &status,
+                task.completed_at.as_deref(),
+                &now,
+            )?;
+            task.assigned_agent_id = None;
+            task.assigned_agent_name = None;
+        }
+    }
     Ok(task)
 }
 
 #[tauri::command]
 pub fn review_task(task_id: String, approved: bool) -> Result<Task, String> {
+    // 规则见 task_state::plan_review（有单测）：验收通过 ⇒ done + 盖完成时间；
+    // 不通过 ⇒ 回 todo；**两种情况都释放 Agent**。
+    let plan = task_state::plan_review(approved);
+
     let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let now = Utc::now().to_rfc3339();
 
-    if approved {
-        task.status = "done".to_string();
+    task.status = plan.next_status.to_string();
+    if plan.stamp_completed_at {
         task.completed_at = Some(now.clone());
-    } else {
-        task.status = "todo".to_string();
     }
-    task.updated_at = now;
+    task.updated_at = now.clone();
 
     // Agent回归空闲
-    if let Some(agent_id) = &task.assigned_agent_id {
-        if let Some(mut agent) = storage::find_agent(agent_id) {
-            agent.status = "idle".to_string();
-            agent.current_task_id = None;
-            storage::save_agent(&agent);
+    //
+    // 同 update_task_status：释放 Agent 时要把任务上的绑定一并清掉，
+    // 否则验收通过后任务仍显示"已分配给某某"，而那个 Agent 已经空闲。
+    if plan.release_agent {
+        if let Some(agent_id) = task.assigned_agent_id.clone() {
+            if let Some(mut agent) = storage::find_agent(&agent_id) {
+                agent.status = "idle".to_string();
+                agent.current_task_id = None;
+                storage::save_agent(&agent);
+            }
         }
     }
 
+    // 先落盘状态，再释放绑定（顺序理由见 update_task_status 的注释：
+    // save_task 是整行 upsert，放在释放之后会把内存里的旧绑定写回去）
     storage::save_task(&task);
+
+    if plan.release_agent {
+        if let Some(agent_id) = task.assigned_agent_id.clone() {
+            storage::release_task_agent(
+                &task_id,
+                &agent_id,
+                &task.status,
+                task.completed_at.as_deref(),
+                &now,
+            )?;
+            task.assigned_agent_id = None;
+            task.assigned_agent_name = None;
+        }
+    }
+
     Ok(task)
 }
 
@@ -477,11 +593,21 @@ pub async fn send_task_message(
     //    just return — the UI can prompt the user to assign one.
     let task = match storage::find_task(&task_id) {
         Some(t) => t,
-        None => return Ok(TaskExchangeResult { user: user_msg, agent: None }),
+        None => {
+            return Ok(TaskExchangeResult {
+                user: user_msg,
+                agent: None,
+            })
+        }
     };
     let agent_id = match &task.assigned_agent_id {
         Some(a) => a.clone(),
-        None => return Ok(TaskExchangeResult { user: user_msg, agent: None }),
+        None => {
+            return Ok(TaskExchangeResult {
+                user: user_msg,
+                agent: None,
+            })
+        }
     };
     let agent = match storage::find_agent(&agent_id) {
         Some(a) => a,
@@ -607,17 +733,39 @@ pub fn update_task(task_id: String, params: UpdateTaskParams) -> Result<Task, St
     let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let now = Utc::now().to_rfc3339();
 
-    if let Some(title) = params.title { task.title = title; }
-    if let Some(desc) = params.description { task.description = desc; }
-    if let Some(status) = params.status { task.status = status; }
-    if let Some(priority) = params.priority { task.priority = priority; }
-    if let Some(start_date) = params.start_date { task.start_date = Some(start_date); }
-    if let Some(due_date) = params.due_date { task.due_date = Some(due_date); }
-    if let Some(milestone) = params.milestone { task.milestone = milestone; }
-    if let Some(agent_id) = params.assigned_agent_id { task.assigned_agent_id = Some(agent_id); }
-    if let Some(tags) = params.tags { task.tags = tags; }
-    if let Some(sort_order) = params.sort_order { task.sort_order = sort_order; }
-    if let Some(cf) = params.custom_fields { task.custom_fields = cf; }
+    if let Some(title) = params.title {
+        task.title = title;
+    }
+    if let Some(desc) = params.description {
+        task.description = desc;
+    }
+    if let Some(status) = params.status {
+        task.status = status;
+    }
+    if let Some(priority) = params.priority {
+        task.priority = priority;
+    }
+    if let Some(start_date) = params.start_date {
+        task.start_date = Some(start_date);
+    }
+    if let Some(due_date) = params.due_date {
+        task.due_date = Some(due_date);
+    }
+    if let Some(milestone) = params.milestone {
+        task.milestone = milestone;
+    }
+    if let Some(agent_id) = params.assigned_agent_id {
+        task.assigned_agent_id = Some(agent_id);
+    }
+    if let Some(tags) = params.tags {
+        task.tags = tags;
+    }
+    if let Some(sort_order) = params.sort_order {
+        task.sort_order = sort_order;
+    }
+    if let Some(cf) = params.custom_fields {
+        task.custom_fields = cf;
+    }
 
     task.updated_at = now;
     storage::save_task(&task);
@@ -625,14 +773,25 @@ pub fn update_task(task_id: String, params: UpdateTaskParams) -> Result<Task, St
 }
 
 #[tauri::command]
-pub fn batch_update_tasks(task_ids: Vec<String>, status: Option<String>, priority: Option<i32>, tags: Option<Vec<String>>) -> Result<i32, String> {
+pub fn batch_update_tasks(
+    task_ids: Vec<String>,
+    status: Option<String>,
+    priority: Option<i32>,
+    tags: Option<Vec<String>>,
+) -> Result<i32, String> {
     let mut count = 0;
     for tid in &task_ids {
         if let Some(mut task) = storage::find_task(tid) {
             let now = Utc::now().to_rfc3339();
-            if let Some(ref s) = status { task.status = s.clone(); }
-            if let Some(p) = priority { task.priority = p; }
-            if let Some(ref t) = tags { task.tags = t.clone(); }
+            if let Some(ref s) = status {
+                task.status = s.clone();
+            }
+            if let Some(p) = priority {
+                task.priority = p;
+            }
+            if let Some(ref t) = tags {
+                task.tags = t.clone();
+            }
             task.updated_at = now;
             storage::save_task(&task);
             count += 1;
@@ -710,11 +869,19 @@ pub fn create_document(project_id: String, title: String, content: String) -> Pr
 }
 
 #[tauri::command]
-pub fn update_document(doc_id: String, title: Option<String>, content: Option<String>) -> Result<ProjectDocument, String> {
+pub fn update_document(
+    doc_id: String,
+    title: Option<String>,
+    content: Option<String>,
+) -> Result<ProjectDocument, String> {
     let mut doc = storage::find_document(&doc_id).ok_or("文档不存在")?;
     let now = Utc::now().to_rfc3339();
-    if let Some(t) = title { doc.title = t; }
-    if let Some(c) = content { doc.content = c; }
+    if let Some(t) = title {
+        doc.title = t;
+    }
+    if let Some(c) = content {
+        doc.content = c;
+    }
     doc.updated_at = now;
     storage::save_document(&doc);
     Ok(doc)

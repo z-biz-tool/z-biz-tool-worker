@@ -144,10 +144,18 @@ pub struct AppConfig {
 fn default_proxy_url() -> String {
     "http://127.0.0.1:9099".to_string()
 }
-fn default_temperature() -> f64 { 0.7 }
-fn default_max_tokens() -> i32 { 4096 }
-fn default_top_p() -> f64 { 1.0 }
-fn default_true() -> bool { true }
+fn default_temperature() -> f64 {
+    0.7
+}
+fn default_max_tokens() -> i32 {
+    4096
+}
+fn default_top_p() -> f64 {
+    1.0
+}
+fn default_true() -> bool {
+    true
+}
 
 // ===== 本地 CLI 探测结果(来自 agent-proxy /v1/cli-agents) =====
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,38 +216,24 @@ fn default_tag_color() -> String {
     "#1677ff".to_string()
 }
 
-// ===== 任务依赖 =====
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskDependency {
-    pub task_id: String,
-    pub depends_on_id: String,
-}
-
-// ===== 任务附件 =====
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskAttachment {
-    pub id: String,
-    pub task_id: String,
-    pub filename: String,
-    pub filepath: String,
-    #[serde(default)]
-    pub filesize: i64,
-    #[serde(default)]
-    pub mime_type: String,
-    pub created_at: String,
-}
-
-// ===== 工作流模板 =====
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowTemplate {
-    pub id: String,
-    pub project_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub statuses: Vec<String>,
-    pub created_at: String,
-}
+// ─────────────────────────────────────────────────────────────────────
+// 关于 `task_dependencies` / `task_attachments` / `workflow_templates`
+//
+// 这三张表在 schema 里存在（`db.rs` 的 `init_schema`），
+// 但**读写走的是裸 SQL**，没有对应的 Rust 结构体：
+// - 依赖：db.rs 的 `get_task_dependencies` / `set_task_dependencies`
+// - 附件：目前只有测试在写
+// - 工作流模板：后端还没有任何命令（前端 WorkflowEditor 自己注释了这一点）
+//
+// 此前这里放着三个**从未被构造**的结构体（`TaskDependency` /
+// `TaskAttachment` / `WorkflowTemplate`），它们是 schema 的「类型化镜像」——
+// 也就是**同一份结构写了两遍**：一遍在 SQL DDL 里，一遍在 Rust 里。
+// 字段一改就会漂移，而编译器不会报（因为镜像根本没被用过）。
+//
+// 现在只留 SQL 这**一份**真相。
+// 将来真要做类型化接口时，请**结构体 + 类型化访问器一起加**，
+// 不要只加结构体 —— 那正是这次删掉的东西。
+// ─────────────────────────────────────────────────────────────────────
 
 // ===== 项目文档 =====
 #[derive(Debug, Clone, Serialize, Deserialize)]

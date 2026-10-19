@@ -49,6 +49,11 @@ jobs:
       # 前端这边一个断言都没跑）。改了逻辑红了，CI 不会知道。
       # 放在 Build 之前：断言是秒级的，挂在构建后面等于白挂。
       - name: Unit tests
+        # TZ 钉成 UTC：甘特图的断言依赖固定时区（时间轴用本地 setDate 做日期加减），
+        # 否则不同 runner 时区下同一份断言会得到不同的数。
+        # 测试文件内部也会 set process.env.TZ = "UTC"，这里是双保险。
+        env:
+          TZ: UTC
         run: npm test
 
       # dist 在 .gitignore 里，而 tauri::generate_context! 要读 frontendDist，
@@ -101,8 +106,24 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
-      - name: Clippy (advisory)
-        # 先不加 `-D warnings`：这条门禁从没在本仓跑过，Linux 上的告警集本地量不到；
-        # 一上来就升级成失败只会得到一条没人能从本地开始查的红灯。跑出干净结果后再收严。
+      - name: Format check (blocking)
+        # 2026-10-19 新增：rustfmt 门禁。
+        #
+        # 此前本仓**根本没有** fmt 步骤，而 `cargo fmt --all --check` 在 HEAD 上
+        # 实测有 **55 处**差异（用 worktree 取 HEAD 跑出来的）——
+        # 也就是说仓库里的 Rust 代码从没被 rustfmt 格式化过。
+        # 本轮已 `cargo fmt --all` 统一（纯机械改写，零语义变化，测试与 clippy 复跑全绿），
+        # 现在把它变成门禁，防止再漂回去。
         working-directory: src-tauri
-        run: cargo clippy --all-targets
+        run: cargo fmt --all --check
+
+      - name: Clippy (blocking)
+        # 2026-10-19：从 advisory 收严为**真门禁**（`-D warnings`）。
+        #
+        # 之前挂着 advisory 的理由是「这条门禁从没在本仓跑过，Linux 上的告警集本地量不到」——
+        # 那时确实量不到；但挂着不卡等于没有门禁：clippy 报出 10 条告警，流水线照样绿。
+        # 现在告警已清零（本地 `cargo clippy --all-targets` 实测 0 条），
+        # 且本仓的 `#[cfg(unix)]` 分支在 ubuntu runner 与本地 macOS 上是同一份代码，
+        # 告警集一致 ⇒ 可以真收严了。
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
