@@ -243,13 +243,44 @@ pub fn list_agent_sessions(app: tauri::AppHandle) -> Vec<AgentSessionInfo> {
 mod tests {
     use super::*;
 
+    /// `claude` CLI 在不在 PATH。
+    ///
+    /// agent-proxy 的 claudeCode wrapper 是**每次请求 spawn claude** 的，
+    /// 所以「代理进程活着」不等于「代理能用」—— 缺 claude 时每一轮都会 500。
+    /// Windows 上 npm 装出来的是 `claude.cmd`，Unix 上是 `claude`，都算。
+    fn claude_cli_present() -> bool {
+        let Ok(path) = std::env::var("PATH") else {
+            return false;
+        };
+        for dir in std::env::split_paths(&path) {
+            for name in ["claude", "claude.cmd", "claude.exe", "claude.bat"] {
+                if dir.join(name).is_file() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// End-to-end: a "worker" agent attaches to a proxy session, runs a
     /// turn, then runs a second turn — and the proxy session id stays the
     /// same. This is the property that makes the worker "stick" to one CLI
     /// instance for the duration of the agent's life.
     ///
-    /// Requires the agent-proxy to be running on 127.0.0.1:9099. Skipped
-    /// otherwise so CI doesn't fail when the proxy isn't up.
+    /// Requires the agent-proxy to be running on 127.0.0.1:9099 **and** the
+    /// `claude` CLI to be installed. Skipped otherwise so CI doesn't fail.
+    ///
+    /// ## 为什么必须额外查 `claude`（2026-10-20 修）
+    ///
+    /// 原来的守卫只有「代理可达吗」。但 CI 上 `agent_proxy::tests::spawn_and_kill_lifecycle`
+    /// **自己会 spawn 一个真 agent-proxy 占住 9099**（CI 的 `npm run build:all` 已经把
+    /// dist 建出来了）⇒ 别的测试的「代理可达」探测**被这条测试骗过** ⇒ 继续往下走，
+    /// 而 CI runner 上**根本没有 claude CLI** ⇒ agent-proxy 每轮都返回
+    /// `HTTP 500 … Claude Code exited with code 1` ⇒ 这条测试在 CI 上必红。
+    ///
+    /// 代理「活着」≠ 代理「能用」：agent-proxy 的 claudeCode wrapper 是每次请求
+    /// `spawn claude` 的，**没有 claude 就必然失败**。
+    /// ⇒ 守卫补上「claude 在不在 PATH」，缺了就跳过并说明原因。
     #[tokio::test]
     async fn worker_attaches_to_session_and_does_real_work() {
         // Probe the proxy.
@@ -260,6 +291,13 @@ mod tests {
             .await;
         if probe.is_err() {
             eprintln!("skipping: agent-proxy not reachable on 127.0.0.1:9099");
+            return;
+        }
+        if !claude_cli_present() {
+            eprintln!(
+                "skipping: `claude` CLI 不在 PATH —— 这条测试要真跑一次 agent 轮次，\
+                 agent-proxy 每次请求都会 spawn claude，没有它必然 500"
+            );
             return;
         }
 
