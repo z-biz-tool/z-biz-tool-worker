@@ -21,7 +21,17 @@
  *    打 `https://api.minimaxi.com/anthropic/v1/messages`（worker 注入的那条），
  *    断言 200 且内容非空。
  *
+ *    **2026-10-22 补**：这条打的是第三方服务，**服务侧的状态不是本仓代码的结论**。
+ *    实测共享 key 连续 3 次都回 `HTTP 429`（限流）⇒ 此前会把整套 `npm test` 判红，
+ *    而红的原因与代码无关；CI 上因为没有凭据而 skip，所以一直没暴露。
+ *    现在分三档：
+ *    - 200 且内容非空 ⇒ **pass**（真正验到了）；
+ *    - 429 / 5xx / 网络不通 ⇒ **skip**，并在 skip 原因里写清「服务侧回了什么」——
+ *      这是「**没验成**」，不是「跑过了」，也不是「代码坏了」；
+ *    - 401 / 403（凭据或端点配错）⇒ 仍然 **fail**（那才是真问题）。
+ *
  * 3. **反向钉**：假 key 必须被服务端拒（401/403）。
+ *    同样口径：限流/故障 ⇒ skip（「没验成」），401/403 ⇒ pass，其它码 ⇒ fail。
  *
  * ## 为什么用「即时转译」而不是 require dist
  *
@@ -171,26 +181,41 @@ test(
         ? false
         : '既没有 ~/.hermes/config.yaml、也没设 MINIMAX_API_KEY —— 这是「没跑」，不是「跑过了」',
   },
-  async () => {
+  async (t) => {
     const mod = loadAgentProxySource('hermesConfig.ts');
     const load = mod.loadMinimaxApiKey as unknown as () => string | null;
     load(); // 走真实的读取路径（读 ~/.hermes/config.yaml）
     const key = KEY || load();
     assert.ok(key && key.length > 20, '没拿到 key');
 
-    const res = await fetch('https://api.minimaxi.com/anthropic/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'MiniMax-M3',
-        max_tokens: 64,
-        messages: [{ role: 'user', content: '只回两个字：收到' }],
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch('https://api.minimaxi.com/anthropic/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'MiniMax-M3',
+          max_tokens: 64,
+          messages: [{ role: 'user', content: '只回两个字：收到' }],
+        }),
+      });
+    } catch (err) {
+      // 网络层就没打通（DNS/离线/代理）⇒ 服务侧没答话，这不是本仓代码的结论。
+      t.skip(`网络没打通（${(err as Error).message}）—— 这条没验成，不是「跑过了」`);
+      return;
+    }
+    if (res.status === 429 || res.status >= 500) {
+      // 限流 / 服务端故障：请求**到了**服务、也**过了鉴权**（否则会是 401），
+      // 只是对方没给额度或临时挂了 ⇒ 同样不是本仓代码的结论。
+      // 2026-10-22 实测：共享 key 连续 3 次都回 429 ⇒ 此前这条会把整套 npm test 判红，
+      // 而红的原因跟本仓代码无关（CI 上因为没有凭据而 skip，所以看不出来）。
+      t.skip(`服务侧回了 HTTP ${res.status}（限流/故障）—— 这条没验成，不是「跑过了」`);
+      return;
+    }
     const body = (await res.json()) as {
       content?: { text?: string }[];
       usage?: Record<string, number>;
@@ -205,20 +230,31 @@ test(
 test(
   'LIVE 反向钉：假 key 必须被 anthropic 兼容端点拒（401/403）',
   { skip: hasRealConfig ? false : '没有 ~/.hermes/config.yaml —— 这是「没跑」' },
-  async () => {
-    const res = await fetch('https://api.minimaxi.com/anthropic/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': 'sk-cp-definitely-invalid-key',
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'MiniMax-M3',
-        max_tokens: 16,
-        messages: [{ role: 'user', content: 'hi' }],
-      }),
-    });
+  async (t) => {
+    let res: Response;
+    try {
+      res = await fetch('https://api.minimaxi.com/anthropic/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': 'sk-cp-definitely-invalid-key',
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'MiniMax-M3',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+    } catch (err) {
+      t.skip(`网络没打通（${(err as Error).message}）—— 这条没验成，不是「跑过了」`);
+      return;
+    }
+    if (res.status === 429 || res.status >= 500) {
+      // 服务侧限流/故障：连鉴权都没走到 ⇒ 这条反向钉这次没验成（不是「跑过了」）。
+      t.skip(`服务侧回了 HTTP ${res.status}（限流/故障）—— 这条没验成，不是「跑过了」`);
+      return;
+    }
     assert.ok(res.status === 401 || res.status === 403, `期望 401/403，实际 ${res.status}`);
   }
 );
