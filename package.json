@@ -28,7 +28,9 @@
     "frappe-gantt": "^1.2.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zustand": "^5.0.0"
+    "zustand": "^5.0.0",
+    "@tauri-apps/plugin-updater": "^2.14.0",
+    "@tauri-apps/plugin-process": "^2.4.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
