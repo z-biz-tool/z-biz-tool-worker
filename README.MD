@@ -95,8 +95,12 @@ interface TaskMessage {
   —— 接下任务时进 `working`，执行完成 / 失败 / 任务释放时回 `idle`。
   类型里还有一个 `offline`，但**当前没有任何代码路径会写入它**（只被统计，不被设置）。
 - Agent 当前任务实时显示
+- Agent 卡片菜单可**切换 CLI 类型**（claude-code / hermes / opencode）：
+  读当前**生效中**的类型并显示会话 id，写入后**自动执行与面板对话同时生效**
 - ⚠️ 手动创建（未绑定本地 CLI）的 Agent 被指派后，任务会停在 `doing` 等人工处理 ——
   后台执行只在 Agent 绑定了 `cli_type` 时才发生
+- CLI 类型只有**一条真源**：用户显式覆盖 > Agent 自己的 `cli_type` > `claude-code`；
+  同一个 Agent 在「自动执行」与「对话」两条路上走的是**同一个** CLI、**同一条**会话
 
 ### 🎯 任务看板（Teambition 风格）
 - 5 列状态：`todo` / `doing` / `waiting` / `review` / `done`
@@ -106,7 +110,8 @@ interface TaskMessage {
 - 任务分配：在**任务详情面板**的「分配给」下拉框里选 Agent
   （看板是 5 条状态列，**没有** Agent 列，也没有「拖到 Agent 列即分配」）
 - 任务依赖：任务详情面板可设置「前置依赖任务」（**不强制**前置必须先完成）
-- 任务消息流：每个任务下保存 `user` / `agent` 角色对话历史
+- 任务消息流：每个任务下保存 `user` / `agent` 角色对话历史，
+  **并在任务详情面板里显示**（自动执行的结果也进这条流 ⇒ Agent 看得见自己刚交付的东西）
 
 ### 📊 实时监控
 - 任务从被指派到完成的实时状态更新（界面每 5 秒拉一次，失败自动退避）
@@ -165,8 +170,7 @@ src-tauri/
 │  ├─ commands.rs           Tauri 命令
 │  ├─ task_state.rs         任务状态流转规则（纯逻辑，有单测）
 │  ├─ agent_proxy.rs        拉起 / 回收 agent-proxy 子进程
-│  ├─ agent_runner.rs       单次任务执行
-│  ├─ agent_session.rs      Agent ↔ proxy 会话绑定
+│  ├─ agent_session.rs      Agent ↔ proxy 会话绑定（对话与自动执行共用这一条）
 │  ├─ models.rs / lib.rs / main.rs
 └─ tauri.conf.json
 ```

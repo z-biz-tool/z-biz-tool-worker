@@ -96,6 +96,13 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
     }
   }, [open, task?.id]);
 
+  // 任务被更新（后台自动执行跑完了 ⇒ task.updated_at 变了）⇒ 把对话也刷新一次。
+  // ⚠ 不刷的话，自动执行的结果要等用户**关掉再打开**面板才看得见
+  //   （5 秒轮询只更新 task，不更新本面板的 messages 状态）。
+  useEffect(() => {
+    if (open && task) loadMessages();
+  }, [open, task?.updated_at]);
+
   const handleStatusChange = async (status: string) => {
     if (await store.updateTaskStatus(task.id, status)) message.success("状态已更新");
   };
@@ -156,12 +163,25 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
       });
       setMessages([...messages, result.user, ...(result.agent ? [result.agent] : [])]);
       setNewMsg("");
+      // ⚠ 后端在「没有分配 Agent」时会**只存用户消息、agent 返回 null**
+      //   （消息落库了，但没人回）⇒ 这里必须说清楚，
+      //   否则用户以为消息发出去了石沉大海。
+      if (!result.agent) {
+        message.warning("消息已记录，但这个任务还没有分配 Agent，暂时没人回复");
+      }
     } catch (e) {
-      message.error("发送失败");
+      message.error(`发送失败：${e?.toString?.() || e}`);
     } finally {
       setSending(false);
     }
   };
+
+  // 「Agent 输出」的内容**已经在对话里出现过**时就不重复显示同一份内容
+  // （自动执行的结果现在既写进 task.output、也写进对话历史 ⇒ 两处一模一样）。
+  const outputText = (task.output || task.agent_output || "").trim();
+  const outputAlreadyInChat = outputText
+    ? messages.some((m) => m.role === "agent" && m.content.trim() === outputText)
+    : false;
 
   return (
     <Drawer
@@ -285,7 +305,7 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
       </div>
 
       {/* 输出 */}
-      {(task.output || task.agent_output) && (
+      {(outputText && !outputAlreadyInChat) && (
         <div style={{ marginBottom: 16 }}>
           <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: "block" }}>Agent 输出</Text>
           <div style={{
@@ -293,7 +313,7 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
             whiteSpace: "pre-wrap", fontSize: 12, fontFamily: "monospace",
             maxHeight: 200, overflow: "auto",
           }}>
-            {task.output || task.agent_output}
+            {outputText}
           </div>
         </div>
       )}
@@ -332,13 +352,58 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
 
       {/* 消息/对话 */}
       <div>
-        <Text type="secondary" style={{ fontSize: 12, marginBottom: 8, display: "block" }}>对话</Text>
+        <Text type="secondary" style={{ fontSize: 12, marginBottom: 8, display: "block" }}>
+          对话{messages.length > 0 ? `（${messages.length} 条）` : ""}
+        </Text>
+        {/* ⚠ 这一段以前**根本没有渲染**：`messages` 被加载、被追加，却从不上屏
+            ⇒ 用户发的消息和 Agent 的回答在界面上一个字都看不到。 */}
+        <div style={{
+          maxHeight: 260, overflow: "auto", marginBottom: 8,
+          border: "1px solid #f0f0f0", borderRadius: 6, padding: 8,
+          background: "#fcfcfc",
+        }}>
+          {messages.length === 0 ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {task.assigned_agent_id
+                ? "还没有对话记录。可以直接给 Agent 发消息。"
+                : "还没有对话记录。这个任务还没分配 Agent —— 消息会被记下来，但没人回复。"}
+            </Text>
+          ) : (
+            messages.map((m) => (
+              <div
+                key={m.id}
+                style={{
+                  marginBottom: 8,
+                  display: "flex",
+                  justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+                }}
+              >
+                <div style={{
+                  maxWidth: "86%",
+                  background: m.role === "user" ? "#e6f4ff" : "#fff",
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 8,
+                  padding: "6px 10px",
+                }}>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 2 }}>
+                    {m.role === "user" ? "我" : "Agent"}
+                    {" · "}
+                    {new Date(m.created_at).toLocaleString("zh-CN")}
+                  </Text>
+                  <Text style={{ fontSize: 13, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {m.content}
+                  </Text>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
         <div style={{ display: "flex", gap: 8 }}>
           <Input
             value={newMsg}
             onChange={(e) => setNewMsg(e.target.value)}
             onPressEnter={handleSendMessage}
-            placeholder="发送消息给 Agent..."
+            placeholder={task.assigned_agent_id ? "发送消息给 Agent..." : "发送消息（该任务未分配 Agent，消息只记录不回）"}
             disabled={sending}
           />
           <Button type="primary" onClick={handleSendMessage} loading={sending}>发送</Button>

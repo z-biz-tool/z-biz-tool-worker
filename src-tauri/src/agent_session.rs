@@ -71,11 +71,18 @@ impl AgentSessionState {
     }
 
     pub fn cli_type_for(&self, agent_id: &str) -> String {
-        let g = self.inner.lock().expect("agent-session mutex poisoned");
-        g.cli_types
-            .get(agent_id)
-            .cloned()
+        self.cli_type_override(agent_id)
             .unwrap_or_else(|| "claude-code".to_string())
+    }
+
+    /// 用户**显式覆盖**过的 CLI 类型（`set_agent_cli_type` 写的）。
+    ///
+    /// ⚠ 旧实现里根本没有这个概念：`cli_type_for` 直接读 `cli_types` 表，
+    /// 而那张表**从来没人写过**（`set_agent_cli_type` 前端一次都没调）
+    /// ⇒ 对话**永远**路由到 `claude-code`。
+    pub fn cli_type_override(&self, agent_id: &str) -> Option<String> {
+        let g = self.inner.lock().expect("agent-session mutex poisoned");
+        g.cli_types.get(agent_id).cloned()
     }
 
     pub fn set_cli_type(&self, agent_id: &str, cli_type: &str) {
@@ -85,21 +92,70 @@ impl AgentSessionState {
         save(&g, &self.path);
     }
 
-    pub fn list(&self) -> Vec<AgentSessionInfo> {
+    /// 列出所有 agent→session 绑定。
+    ///
+    /// `agent_cli_type` 回调给出「这个 Agent 自己声明的 CLI 类型」
+    /// （库里 `agents.cli_type` 那一列）⇒ 用来把**生效中**的类型算出来，
+    /// 而不是只报那张「覆盖表」里的值。
+    pub fn list(&self, agent_cli_type: &dyn Fn(&str) -> Option<String>) -> Vec<AgentSessionInfo> {
         let g = self.inner.lock().expect("agent-session mutex poisoned");
         g.sessions
             .iter()
             .map(|(agent_id, session_id)| AgentSessionInfo {
                 agent_id: agent_id.clone(),
                 session_id: session_id.clone(),
-                cli_type: g
-                    .cli_types
-                    .get(agent_id)
-                    .cloned()
-                    .unwrap_or_else(|| "claude-code".to_string()),
+                cli_type: resolve_cli_type_in(
+                    &g.cli_types,
+                    agent_cli_type(agent_id).as_deref(),
+                    agent_id,
+                ),
             })
             .collect()
     }
+}
+
+/// 这个 Agent **实际**该走哪个 CLI。
+///
+/// 优先级（三层，从上到下）：
+///   1. **用户显式覆盖**（`set_agent_cli_type` 写进 `cli_types` 的那张表）；
+///   2. **Agent 自己声明的** `cli_type`（导入本地 CLI 时写进 `agents` 表的那一列）；
+///   3. `claude-code`（兜底）。
+///
+/// ⚠ **旧实现只认第 1 层，而第 1 层从来没人写过** ⇒ 对话（`send_task_message`）
+///   **永远**路由到 claude-code ⇒ 卡片上写着「Hermes」的 Agent，
+///   **对话里跑的却是 Claude Code** —— 同一个 Agent 有两套 CLI 说法。
+///
+/// ⚠ 第 2 层以前也被忽略：自动执行走的是 `agent.cli_type`（对的），
+///   对话走的是 `cli_type_for`（错的）⇒ **两条路连的根本不是同一个东西**。
+///
+/// 这函数是**纯函数**（不碰 IO）⇒ 可以逐条单测。
+pub fn resolve_cli_type_in(
+    overrides: &HashMap<String, String>,
+    agent_cli_type: Option<&str>,
+    agent_id: &str,
+) -> String {
+    if let Some(t) = overrides.get(agent_id) {
+        if !t.trim().is_empty() {
+            return t.clone();
+        }
+    }
+    match agent_cli_type {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => "claude-code".to_string(),
+    }
+}
+
+/// `resolve_cli_type_in` 的带状态版本。
+pub fn resolve_cli_type(
+    state: &AgentSessionState,
+    agent_cli_type: Option<&str>,
+    agent_id: &str,
+) -> String {
+    let overrides = {
+        let g = state.inner.lock().expect("agent-session mutex poisoned");
+        g.cli_types.clone()
+    };
+    resolve_cli_type_in(&overrides, agent_cli_type, agent_id)
 }
 
 #[derive(Serialize)]
@@ -111,19 +167,36 @@ pub struct AgentSessionInfo {
 
 // ──────────── proxy HTTP client ────────────
 
+/// 代理地址：**配置优先**，否则默认。
+///
+/// ⚠ 旧实现里 `chat()` **硬编码** `http://127.0.0.1:9099`，
+/// 而设置项 `agent_proxy_url` 只有 `discover_local_agents` 在读
+/// ⇒ 用户改了代理地址，「发现本地 Agent」能连上、**对话却连的是老地址**
+/// ⇒ **同一个代理有两套地址**。
+pub fn proxy_url() -> String {
+    let cfg = crate::storage::read_config();
+    let configured = cfg.agent_proxy_url.trim();
+    if configured.is_empty() {
+        PROXY_DEFAULT_URL.to_string()
+    } else {
+        configured.to_string()
+    }
+}
+
 /// POST a chat completion to the local agent-proxy. Returns the assistant
 /// text. `cli_type` becomes `X-CLI-Type` (lets the caller force a wrapper
 /// regardless of how the agent was previously routed).
+///
+/// `proxy_agent_id` 变成 `X-Agent-Id` ⇒ 代理按**那个具体的 Agent** 路由，
+/// 而不是「按 CLI 类型取第一个」（同类型的 Agent 多于一个时会路由错）。
 pub async fn chat(
-    proxy_url: Option<&str>,
+    proxy_url: &str,
     session_id: &str,
     cli_type: &str,
+    proxy_agent_id: Option<&str>,
     messages: Vec<ChatMessage>,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/v1/chat/completions",
-        proxy_url.unwrap_or(PROXY_DEFAULT_URL)
-    );
+    let url = format!("{}/v1/chat/completions", proxy_url);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -132,11 +205,17 @@ pub async fn chat(
         "stream": false,
         "messages": messages,
     });
-    let resp = client
+    let mut req = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("X-Session-Id", session_id)
-        .header("X-CLI-Type", cli_type)
+        .header("X-CLI-Type", cli_type);
+    if let Some(aid) = proxy_agent_id {
+        if !aid.trim().is_empty() {
+            req = req.header("X-Agent-Id", aid);
+        }
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -233,10 +312,15 @@ pub fn set_agent_cli_type(
 }
 
 /// Tauri command: list all agent->session bindings (for the UI to display).
+///
+/// ⚠ 报的是**生效中**的 CLI 类型（覆盖 > Agent 自己声明的 > claude-code），
+///   不是「覆盖表」里的原值 ⇒ 界面上显示的与实际会跑的**是同一个**。
 #[tauri::command]
 pub fn list_agent_sessions(app: tauri::AppHandle) -> Vec<AgentSessionInfo> {
     let state = app.state::<AgentSessionState>();
-    state.list()
+    state.list(&|agent_id: &str| {
+        crate::storage::find_agent(agent_id).and_then(|a| a.cli_type.clone())
+    })
 }
 
 #[cfg(test)]
@@ -312,9 +396,10 @@ mod tests {
 
         // turn 1: ask the agent to remember a word
         let reply1 = chat(
-            None,
+            "http://127.0.0.1:9099",
             &sid1,
             &cli_type,
+            None,
             vec![
                 ChatMessage {
                     role: "system".to_string(),
@@ -336,9 +421,10 @@ mod tests {
         assert_eq!(sid1, sid2, "session id must be stable across turns");
 
         let reply2 = chat(
-            None,
+            "http://127.0.0.1:9099",
             &sid2,
             &cli_type,
+            None,
             vec![ChatMessage {
                 role: "user".to_string(),
                 content: "What word did I ask you to remember? Just the word.".into(),
@@ -368,25 +454,107 @@ mod tests {
         assert_ne!(a, c, "different agents should get different sessions");
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// **生效中的 CLI 类型**的三层优先级（纯函数，逐条钉住）。
+    ///
+    /// ⚠ 这条规则是本轮修的一个真 bug 的核心：
+    /// 旧实现只认「用户覆盖」那一层，而覆盖表**从来没人写过**
+    /// ⇒ 对话**永远**路由到 claude-code
+    /// ⇒ 卡片上写着「Hermes」的 Agent，对话里跑的却是 Claude Code。
+    #[test]
+    fn cli_type_resolution_precedence() {
+        let mut overrides: HashMap<String, String> = HashMap::new();
+
+        // ① 没有任何说法 ⇒ 兜底 claude-code
+        assert_eq!(
+            resolve_cli_type_in(&overrides, None, "agent-A"),
+            "claude-code",
+            "既没有覆盖、也没有 Agent 自己声明的类型时，应当兜底 claude-code"
+        );
+
+        // ② Agent 自己声明的（导入本地 CLI 时写进 agents 表的那一列）
+        assert_eq!(
+            resolve_cli_type_in(&overrides, Some("hermes"), "agent-A"),
+            "hermes",
+            "没有覆盖时，应当用 Agent 自己声明的 CLI 类型"
+        );
+
+        // ③ 用户显式覆盖 ⇒ 压过 Agent 自己声明的
+        overrides.insert("agent-A".to_string(), "opencode".to_string());
+        assert_eq!(
+            resolve_cli_type_in(&overrides, Some("hermes"), "agent-A"),
+            "opencode",
+            "用户覆盖应当压过 Agent 自己声明的类型"
+        );
+        assert_eq!(
+            resolve_cli_type_in(&overrides, None, "agent-A"),
+            "opencode",
+            "有覆盖时应当用覆盖值"
+        );
+
+        // ④ 覆盖只作用于**它自己那个** Agent
+        assert_eq!(
+            resolve_cli_type_in(&overrides, Some("hermes"), "agent-B"),
+            "hermes",
+            "A 的覆盖不该影响 B"
+        );
+
+        // ⑤ 空串覆盖 = 没覆盖（不能把「空」当成「显式选了空」）
+        overrides.insert("agent-C".to_string(), "   ".to_string());
+        assert_eq!(
+            resolve_cli_type_in(&overrides, Some("hermes"), "agent-C"),
+            "hermes",
+            "空白覆盖应当当作没覆盖"
+        );
+
+        // ⑥ 空串的 Agent 自声明类型也当没声明
+        assert_eq!(
+            resolve_cli_type_in(&HashMap::new(), Some("  "), "agent-D"),
+            "claude-code",
+            "空白自声明类型应当兜底"
+        );
+    }
+
+    /// `set_agent_cli_type` 写的覆盖值，**真的**能读回来（原来读的是另一张永远空的表）。
+    #[test]
+    fn cli_type_override_round_trips() {
+        let tmp =
+            std::env::temp_dir().join(format!("agent-session-ovr-{}.json", uuid::Uuid::new_v4()));
+        let state = AgentSessionState::load_from(tmp.clone());
+        assert_eq!(state.cli_type_override("agent-A"), None);
+        state.set_cli_type("agent-A", "hermes");
+        assert_eq!(
+            state.cli_type_override("agent-A").as_deref(),
+            Some("hermes")
+        );
+        // 覆盖优先于 Agent 自声明的类型
+        assert_eq!(
+            resolve_cli_type(&state, Some("opencode"), "agent-A"),
+            "hermes",
+            "有覆盖时应当用覆盖值"
+        );
+        // 别的 Agent 不受影响
+        assert_eq!(
+            resolve_cli_type(&state, Some("opencode"), "agent-B"),
+            "opencode",
+            "覆盖只作用于它自己那个 Agent"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Tauri command: actually run a turn — sends a user message to the proxy
 /// under the agent's persistent session and returns the assistant's reply.
-/// This is the function that turns an Agent into a "worker that does work".
-#[tauri::command]
-pub async fn run_agent_turn(
-    app: tauri::AppHandle,
-    agent_id: String,
-    system_prompt: String,
-    user_message: String,
-    history: Option<Vec<ChatMessage>>,
-) -> Result<AgentTurnResult, String> {
-    run_agent_turn_inner(&app, agent_id, system_prompt, user_message, history).await
-}
-
-/// Pure async function: the same work as `run_agent_turn` but without the
-/// `#[tauri::command]` attribute. Other commands (e.g. `send_task_message`)
-/// reuse this to avoid duplicating the proxy plumbing.
+///
+/// ⚠ **本命令已删除（2026-10-25）**：它是一条**绕过消息持久化**的入口
+///   —— 跑完的回复既不写 `task_messages`、也不更新任务状态。
+///   前端从来没用过它（家族探针实测：worker 38 个注册命令里它属「连提都没提」那一档），
+///   而它恰好就是本轮要修的那个洞的**同款入口**
+///   （「自动执行的结果不入对话历史 ⇒ Agent 失忆」）⇒ 留着就是留后门。
+///   ⇒ 对话请走 `send_task_message`（会落库），自动执行请走
+///   `commands::run_task_background`（同样会落库）。
+///
+/// 下面保留的是**内部函数**（对话与自动执行共用这一条会话路径）。
 pub async fn run_agent_turn_inner(
     app: &tauri::AppHandle,
     agent_id: String,
@@ -396,7 +564,12 @@ pub async fn run_agent_turn_inner(
 ) -> Result<AgentTurnResult, String> {
     let state = app.state::<AgentSessionState>();
     let sid = state.get_or_create(&agent_id);
-    let cli_type = state.cli_type_for(&agent_id);
+    let agent = crate::storage::find_agent(&agent_id);
+    let agent_cli_type = agent.as_ref().and_then(|a| a.cli_type.clone());
+    let proxy_agent_id = agent.as_ref().and_then(|a| a.local_agent_id.clone());
+    // ⚠ **生效中的 CLI 类型**：用户覆盖 > Agent 自己声明的 > claude-code。
+    //   旧实现只认覆盖值，而覆盖表从来没人写过 ⇒ 对话永远走 claude-code。
+    let cli_type = resolve_cli_type(&state, agent_cli_type.as_deref(), &agent_id);
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     if !system_prompt.trim().is_empty() {
@@ -413,7 +586,14 @@ pub async fn run_agent_turn_inner(
         content: user_message,
     });
 
-    let reply = chat(None, &sid, &cli_type, messages).await?;
+    let reply = chat(
+        &proxy_url(),
+        &sid,
+        &cli_type,
+        proxy_agent_id.as_deref(),
+        messages,
+    )
+    .await?;
     Ok(AgentTurnResult {
         session_id: sid,
         reply,

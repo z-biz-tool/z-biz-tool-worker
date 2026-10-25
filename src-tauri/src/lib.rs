@@ -1,5 +1,4 @@
 mod agent_proxy;
-mod agent_runner;
 mod agent_session;
 mod commands;
 mod db;
@@ -57,7 +56,12 @@ pub fn run() {
             agent_session::get_agent_session,
             agent_session::set_agent_cli_type,
             agent_session::list_agent_sessions,
-            agent_session::run_agent_turn,
+            // ⚠ `agent_session::run_agent_turn` 已删（2026-10-25）：
+            //   它是**绕过消息持久化**的入口（跑完的回复既不写 task_messages、
+            //   也不更新任务状态）⇒ 正是「自动执行的结果不入对话历史 ⇒ Agent 失忆」
+            //   那个洞的同款入口 ⇒ 留着就是留后门。
+            //   对话走 `commands::send_task_message`（落库），
+            //   自动执行走 `commands::run_task_background`（同样落库）。
         ])
         .setup(|app| {
             match agent_proxy::spawn() {

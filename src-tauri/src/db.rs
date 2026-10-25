@@ -753,7 +753,11 @@ pub fn find_task(db: &Database, id: &str) -> Option<Task> {
 pub fn read_task_messages(db: &Database, task_id: &str) -> Vec<TaskMessage> {
     let conn = db.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, task_id, role, content, created_at FROM task_messages WHERE task_id = ?1 ORDER BY created_at")
+        // ⚠ **`created_at` 相同的时候要按插入顺序排**（`rowid` 是 tiebreaker）：
+        //   同一轮里「用户消息」和「Agent 回复」用的是**同一个**时间戳
+        //   （`send_task_message` 里 `now` 只取一次）⇒ 只按 `created_at` 排序时
+        //   它们的先后是**不确定**的 ⇒ 对话顺序会随机跳。
+        .prepare("SELECT id, task_id, role, content, created_at FROM task_messages WHERE task_id = ?1 ORDER BY created_at, rowid")
         .unwrap();
     stmt.query_map(params![task_id], |row| {
         Ok(TaskMessage {

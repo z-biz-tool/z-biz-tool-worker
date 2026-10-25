@@ -186,6 +186,13 @@ pub fn group_signal_target(pid: u32) -> Option<i32> {
 
 /// `taskkill` 杀进程树的参数。`force=false` 是先礼后兵的「礼」。
 /// 纯函数，任何平台都能测（编译和跑测试不依赖 Windows）。
+///
+/// ⚠ **只有 Windows 分支会调用它** ⇒ 非 Windows 的**非测试**构建里它是死代码
+///   ⇒ `cargo clippy -- -D warnings` 会直接判红（CI 的 Rust 腿就是这个命令）。
+///   ⇒ 这里**精确豁免这一条**（不是整仓关掉这个 lint）：
+///   真要治它，就得把这段参数构造在两个平台各写一遍 ⇒ 反而更容易漂移。
+///   测试（`taskkill_tree_args_shape`）在所有平台都跑 ⇒ 逻辑本身一直有覆盖。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn taskkill_tree_args(pid: u32, force: bool) -> Vec<String> {
     let mut args = vec!["/T".to_string(), "/PID".to_string(), pid.to_string()];
     if force {

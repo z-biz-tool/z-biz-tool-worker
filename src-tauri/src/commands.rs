@@ -1,18 +1,17 @@
-use crate::agent_runner;
 use crate::models::*;
 use crate::storage;
 use crate::task_state;
 use chrono::Utc;
 
-const DEFAULT_AGENT_PROXY_URL: &str = "http://127.0.0.1:9099";
-
+/// 代理地址（**单一真源**）。
+///
+/// ⚠ 旧实现有两份：这里读设置里的 `agent_proxy_url`，
+/// 而 `agent_session::chat()` **硬编码** `http://127.0.0.1:9099`
+/// ⇒ 用户改了代理地址，「发现本地 Agent」连的是新地址、**对话连的是老地址**
+/// ⇒ 同一个代理有两套地址 ⇒ 对话要么连不上、要么连到另一个实例。
+/// ⇒ 现在两边都走 `agent_session::proxy_url()`。
 fn get_proxy_url() -> String {
-    let config = storage::read_config();
-    if config.agent_proxy_url.is_empty() {
-        DEFAULT_AGENT_PROXY_URL.to_string()
-    } else {
-        config.agent_proxy_url
-    }
+    crate::agent_session::proxy_url()
 }
 
 // ===== 项目命令 =====
@@ -291,7 +290,11 @@ pub fn delete_task(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
+pub async fn assign_task(
+    app: tauri::AppHandle,
+    task_id: String,
+    agent_id: String,
+) -> Result<Task, String> {
     let agent = storage::find_agent(&agent_id).ok_or("Agent不存在")?;
     let task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let now = Utc::now().to_rfc3339();
@@ -350,20 +353,19 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
 
     // 后台触发 agent-proxy 真实执行。task 已经持久化为 doing,
     // 即使后台失败,任务也不会卡死:失败时改 waiting + 写错误到 output。
+    //
+    // ⚠ 走 Tauri 的异步运行时（不是 `std::thread`）——
+    //   因为执行路径换成了 `agent_session::run_agent_turn_inner`（async），
+    //   它与**面板对话**共用同一个 proxy session（同一个 Agent ⇒ 同一个会话）。
     let task_id_bg = task.id.clone();
     let agent_id_bg = agent.id.clone();
-    let cli_type_bg = agent.cli_type.clone();
     let prompt_bg = format!(
         "任务标题: {}\n任务描述: {}\n\n请直接给出结果,不要解释你的工具调用过程。",
         task.title, task.description
     );
-    std::thread::spawn(move || {
-        run_task_background(
-            &task_id_bg,
-            &agent_id_bg,
-            cli_type_bg.as_deref(),
-            &prompt_bg,
-        );
+    let app_bg = app.clone();
+    tauri::async_runtime::spawn(async move {
+        run_task_background(&app_bg, &task_id_bg, &agent_id_bg, &prompt_bg).await;
     });
 
     Ok(task)
@@ -371,8 +373,13 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
 
 /// 重试卡在 doing 的任务(网络抖 / agent-proxy 重启后状态丢失 / LLM 超时等场景)。
 /// 把 task 改回 doing 后再后台跑一次。
+///
+/// ⚠ **重试不再是「从零开始」**：执行走的是**同一个 Agent 的同一条会话**，
+///   并且带上这个任务已有的消息历史 ⇒ Agent 记得上次跑到哪、也记得用户的追问。
+///   （旧实现走 `agent_runner::run_agent`：每次 `/v1/session/open` 开**新**会话、
+///   不带任何历史 ⇒ 每次重试都从空白开始。）
 #[tauri::command]
-pub fn retry_task(task_id: String) -> Result<Task, String> {
+pub async fn retry_task(app: tauri::AppHandle, task_id: String) -> Result<Task, String> {
     let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
     let agent_id = task
         .assigned_agent_id
@@ -386,41 +393,77 @@ pub fn retry_task(task_id: String) -> Result<Task, String> {
 
     let task_id_bg = task.id.clone();
     let agent_id_bg = agent.id.clone();
-    let cli_type_bg = agent.cli_type.clone();
     let prompt_bg = format!(
         "任务标题: {}\n任务描述: {}\n\n请直接给出结果,不要解释你的工具调用过程。",
         task.title, task.description
     );
-    std::thread::spawn(move || {
-        run_task_background(
-            &task_id_bg,
-            &agent_id_bg,
-            cli_type_bg.as_deref(),
-            &prompt_bg,
-        );
+    let app_bg = app.clone();
+    tauri::async_runtime::spawn(async move {
+        run_task_background(&app_bg, &task_id_bg, &agent_id_bg, &prompt_bg).await;
     });
     Ok(task)
 }
 
-/// 后台执行核心:调本地 agent-proxy,成功 → review + output,失败 → waiting + 错误信息。
-/// cli_type 为 None(手填 agent)时不调 LLM,直接停在 doing 等用户手动操作。
-fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, prompt: &str) {
-    let Some(cli_type) = cli_type else {
+/// 后台执行核心：跑一轮 Agent，并把**结果写进对话历史**。
+///
+/// ⚠ **本轮改了三处**（旧实现全是坏的）：
+///  1. **会话**：旧实现走 `agent_runner::run_agent` ⇒ 每次 `/v1/session/open` 开**新**会话、
+///     不带历史 ⇒ 自动执行与面板对话是**两个互不相干的对话**。
+///     现在走 `agent_session::run_agent_turn_inner` ⇒ **同一个 Agent ⇒ 同一个 proxy session**。
+///  2. **历史**：现在把这条任务已有的消息当上下文带进去 ⇒ 重试不是从零开始。
+///  3. **落进对话历史**：旧实现只写 `task.output` / `task.agent_output`
+///     ⇒ **对话里什么都没有** ⇒ 用户在面板里问「你刚才那个结果里 X 是多少」，
+///     Agent **看不到自己刚才的输出**（`send_task_message` 只读 `task_messages`）
+///     ⇒ **界面显示着结果、Agent 却失忆**。
+///     现在成功/失败都写一条 `role="agent"` 的消息 ⇒ 用户看得见、Agent 也记得。
+///
+/// `agent` 没有 `cli_type`（手填 Agent）时不调 LLM，直接停在 doing 等用户手动操作（原行为不变）。
+async fn run_task_background(app: &tauri::AppHandle, task_id: &str, agent_id: &str, prompt: &str) {
+    let agent = match storage::find_agent(agent_id) {
+        Some(a) => a,
+        None => {
+            eprintln!("[run_task_background] agent {} 不存在,跳过执行", agent_id);
+            return;
+        }
+    };
+    if agent.cli_type.is_none() {
         eprintln!(
             "[run_task_background] agent {} 非本地 CLI,跳过执行",
             agent_id
         );
         return;
-    };
-    match agent_runner::run_agent(cli_type, prompt) {
-        Ok(output) => {
+    }
+
+    // 历史：这个任务已有的消息（用户追问 + 之前的自动执行结果）⇒ 重试能接上
+    let history_msgs = build_history_msgs(task_id);
+
+    let result = crate::agent_session::run_agent_turn_inner(
+        app,
+        agent_id.to_string(),
+        agent.system_prompt.clone(),
+        prompt.to_string(),
+        Some(history_msgs),
+    )
+    .await;
+
+    let now = Utc::now().to_rfc3339();
+    match result {
+        Ok(out) => {
             if let Some(mut t) = storage::find_task(task_id) {
-                t.output = Some(output.clone());
-                t.agent_output = Some(output);
+                t.output = Some(out.reply.clone());
+                t.agent_output = Some(out.reply.clone());
                 t.status = "review".to_string();
-                t.updated_at = Utc::now().to_rfc3339();
+                t.updated_at = now.clone();
                 storage::save_task(&t);
             }
+            // ★ 结果也进对话历史 ⇒ 用户看得见、Agent 记得（见上面的第 3 条）
+            storage::save_task_message(&TaskMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.to_string(),
+                role: "agent".to_string(),
+                content: out.reply,
+                created_at: now.clone(),
+            });
             // 释放 Agent
             if let Some(mut a) = storage::find_agent(agent_id) {
                 a.status = "idle".to_string();
@@ -433,12 +476,21 @@ fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, pr
                 "[run_task_background] task {} agent-proxy 执行失败: {}",
                 task_id, e
             );
+            let failed_text = format!("[执行失败,点「重试」再来一次]\n\n{}", e);
             if let Some(mut t) = storage::find_task(task_id) {
                 t.status = "waiting".to_string();
-                t.output = Some(format!("[执行失败,点「重试」再来一次]\n\n{}", e));
-                t.updated_at = Utc::now().to_rfc3339();
+                t.output = Some(failed_text.clone());
+                t.updated_at = now.clone();
                 storage::save_task(&t);
             }
+            // 失败也要留痕：用户与 Agent 都要看得见「上次没成」
+            storage::save_task_message(&TaskMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.to_string(),
+                role: "agent".to_string(),
+                content: failed_text,
+                created_at: now.clone(),
+            });
             if let Some(mut a) = storage::find_agent(agent_id) {
                 a.status = "idle".to_string();
                 a.current_task_id = None;
@@ -446,6 +498,26 @@ fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, pr
             }
         }
     }
+}
+
+/// 这个任务已有的消息 ⇒ LLM 上下文。
+///
+/// `role` 只有 `user` / `agent` 两种 ⇒ 直接映射成 OpenAI 的 `user` / `assistant`。
+fn build_history_msgs(task_id: &str) -> Vec<crate::agent_session::ChatMessage> {
+    storage::read_task_messages(task_id)
+        .into_iter()
+        .filter_map(|m| {
+            let role = match m.role.as_str() {
+                "user" => "user",
+                "agent" => "assistant",
+                _ => return None,
+            };
+            Some(crate::agent_session::ChatMessage {
+                role: role.to_string(),
+                content: m.content,
+            })
+        })
+        .collect()
 }
 
 /// 任意状态流转。合法的状态: todo | doing | waiting | review | done
@@ -623,18 +695,22 @@ pub async fn send_task_message(
     //    description, prior messages, the new user message.
     let history = storage::read_task_messages(&task_id);
     let mut history_msgs: Vec<crate::agent_session::ChatMessage> = Vec::new();
-    if let Some(first) = history.first() {
+    if !task.description.is_empty() {
         // Anchor the conversation with the task description so the agent
         // has the brief in context.
-        if !task.description.is_empty() {
-            history_msgs.push(crate::agent_session::ChatMessage {
-                role: "user".to_string(),
-                content: format!("[Task: {}]\n{}", task.title, task.description),
-            });
-        }
-        let _ = first; // silence unused
+        history_msgs.push(crate::agent_session::ChatMessage {
+            role: "user".to_string(),
+            content: format!("[Task: {}]\n{}", task.title, task.description),
+        });
     }
     for m in &history {
+        // 刚存进去的那条用户消息**不算**进历史（否则这一轮会把它说两遍）。
+        // ⚠ 用 id 精确排除，而不是「无脑 pop 最后一条」——
+        //   自动执行的结果现在也会进 history（role=agent），
+        //   无脑 pop 会把**它**弹掉 ⇒ 正好把我们要保留的东西删了。
+        if m.id == user_msg.id {
+            continue;
+        }
         if m.role == "user" {
             history_msgs.push(crate::agent_session::ChatMessage {
                 role: "user".to_string(),
@@ -647,8 +723,29 @@ pub async fn send_task_message(
             });
         }
     }
-    // The just-stored user message is already in `history`; avoid double.
-    history_msgs.pop();
+
+    // ★ 任务已有的产出也要进上下文 ——
+    //   否则用户问「你刚才那个结果里 X 是多少」时，Agent **看不见自己刚交付的东西**
+    //   （界面上明明显示着结果，Agent 却答不上来 ⇒ 界面说成功、事实不是）。
+    //   自动执行的结果现在也会写进 `task_messages` ⇒ 自动执行过的任务天然覆盖；
+    //   这一条是为了**旧数据**（产出在 task 上、对话里没有）。
+    let task_output = task
+        .output
+        .as_deref()
+        .or(task.agent_output.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(out) = task_output {
+        let already = history_msgs
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.trim() == out);
+        if !already {
+            history_msgs.push(crate::agent_session::ChatMessage {
+                role: "assistant".to_string(),
+                content: out.to_string(),
+            });
+        }
+    }
 
     // 4. Call the proxy. The session id is stable per-agent so the
     //    underlying CLI keeps the conversation context.

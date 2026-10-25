@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Layout, Button, Modal, Input, Tag, Empty, Space, Typography, Dropdown,
-  message, Avatar, Collapse, Card, Spin, Alert, Tooltip, Checkbox,
+  message, Avatar, Collapse, Card, Spin, Alert, Tooltip, Checkbox, Radio,
 } from "antd";
 import type { InputRef } from "antd";
 import {
   PlusOutlined, DeleteOutlined, CopyOutlined, EditOutlined,
   SettingOutlined, ApiOutlined, ThunderboltOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
+  SwapOutlined,
 } from "@ant-design/icons";
+import { invoke } from "@tauri-apps/api/core";
 import { useWorkerStore } from "./stores/workerStore";
 import { useViewStore, VIEW_ORDER } from "./stores/viewStore";
 import { filterTasks } from "./utils/taskFilters";
 import { useDraft } from "./hooks/useDraft";
-import type { Task, LocalAgentInfo, Project } from "./types";
+import type { Task, LocalAgentInfo, Project, Agent } from "./types";
 import TopBar from "./components/TopBar";
 import KanbanView from "./components/views/KanbanView";
 import ListView from "./components/views/ListView";
@@ -55,6 +57,14 @@ export default function App() {
   });
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [newTaskSignal, setNewTaskSignal] = useState(0);
+  // Agent 会话：当前正在挑 CLI 类型的 Agent（+ 它生效中的类型与会话 id）
+  const [cliPicker, setCliPicker] = useState<{
+    agentId: string;
+    agentName: string;
+    current: string;
+    sessionId: string;
+    saving: boolean;
+  } | null>(null);
   const searchInputRef = useRef<InputRef>(null);
 
   const currentProject = store.projects.find((p) => p.id === store.currentProjectId);
@@ -374,6 +384,48 @@ export default function App() {
     }
   };
 
+  /**
+   * 打开「切换 CLI 类型」对话框。
+   *
+   * ⚠ 为什么要这个入口（2026-10-25）：
+   * 后端本来就有 `get_agent_session` / `set_agent_cli_type` 两个命令，
+   * 但**前端从来没调过**（家族探针实测：worker 38 个注册命令里，
+   * 它们属「连提都没提」那一档）⇒
+   * ① 用户没法决定某个 Agent 用哪个 CLI 对话；
+   * ② 后端那张「覆盖表」永远是空的 ⇒ 对话**永远**路由到 claude-code
+   *    ⇒ 卡片上写着「Hermes」的 Agent，对话里跑的却是 Claude Code。
+   * ⇒ 现在这个入口把两者接上：读当前生效值（get）→ 改（set）。
+   */
+  const openCliPicker = async (agent: Agent) => {
+    let current = agent.cli_type || "claude-code";
+    let sessionId = "";
+    try {
+      const info = await invoke<{ agent_id: string; session_id: string; cli_type: string }>(
+        "get_agent_session",
+        { agentId: agent.id },
+      );
+      if (info?.cli_type) current = info.cli_type;
+      sessionId = info?.session_id || "";
+    } catch (e) {
+      // 读不到就退回卡片上显示的那个，别把对话框卡住
+      message.warning(`读取 Agent 会话失败：${e?.toString?.() || e}`);
+    }
+    setCliPicker({ agentId: agent.id, agentName: agent.name, current, sessionId, saving: false });
+  };
+
+  const saveCliType = async (cliType: string) => {
+    if (!cliPicker) return;
+    setCliPicker({ ...cliPicker, saving: true });
+    try {
+      await invoke("set_agent_cli_type", { agentId: cliPicker.agentId, cliType });
+      message.success(`${cliPicker.agentName} 现在走 ${CLI_LABELS[cliType]?.label || cliType}`);
+      setCliPicker(null);
+    } catch (e) {
+      message.error(`保存失败：${e?.toString?.() || e}`);
+      setCliPicker({ ...cliPicker, saving: false });
+    }
+  };
+
   // Agent 管理面板
   const renderAgentTab = () => (
     <div>
@@ -418,6 +470,12 @@ export default function App() {
                     menu={{
                       items: [
                         { key: "clone", label: "克隆", icon: <CopyOutlined /> },
+                        {
+                          key: "cli",
+                          label: "切换 CLI 类型",
+                          icon: <SwapOutlined />,
+                          disabled: !isLocal,
+                        },
                         { key: "del", label: "删除", icon: <DeleteOutlined />, danger: true },
                       ],
                       onClick: async ({ key }) => {
@@ -431,6 +489,9 @@ export default function App() {
                         if (key === "clone") {
                           const ok = await store.cloneAgent(currentProject!.id, a.id, "");
                           if (ok) message.success(`已克隆 ${a.name}`);
+                        }
+                        if (key === "cli" && isLocal) {
+                          await openCliPicker(a);
                         }
                       },
                     }}
@@ -548,6 +609,53 @@ export default function App() {
           style={{ marginBottom: 8 }}
         />
         <TextArea placeholder="项目描述" rows={3} value={projectForm.desc} onChange={(e) => setProjectForm({ ...projectForm, desc: e.target.value })} />
+      </Modal>
+
+      {/* 切换 Agent 的 CLI 类型 */}
+      <Modal
+        title={cliPicker ? `切换 "${cliPicker.agentName}" 的 CLI 类型` : "切换 CLI 类型"}
+        open={!!cliPicker}
+        onCancel={() => setCliPicker(null)}
+        footer={null}
+        width={480}
+      >
+        {cliPicker && (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type="info"
+              showIcon
+              message="这个设置会同时作用于「自动执行」和「面板对话」"
+              description="后端取的是：显式覆盖 > 这个 Agent 自己的 cli_type > claude-code。改动立即生效。"
+            />
+            <Radio.Group
+              value={cliPicker.current}
+              onChange={(e) => setCliPicker({ ...cliPicker, current: e.target.value })}
+              style={{ display: "flex", flexDirection: "column", gap: 8 }}
+            >
+              {Object.entries(CLI_LABELS).map(([key, meta]) => (
+                <Radio key={key} value={key}>
+                  <Tag color={meta.color} style={{ marginRight: 8 }}>{meta.label}</Tag>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{key}</Text>
+                </Radio>
+              ))}
+            </Radio.Group>
+            {cliPicker.sessionId && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                会话 ID：{cliPicker.sessionId}
+              </Text>
+            )}
+            <Space>
+              <Button
+                type="primary"
+                loading={cliPicker.saving}
+                onClick={() => saveCliType(cliPicker.current)}
+              >
+                保存
+              </Button>
+              <Button onClick={() => setCliPicker(null)}>取消</Button>
+            </Space>
+          </Space>
+        )}
       </Modal>
 
       {/* 重命名项目弹窗 */}
