@@ -21,6 +21,7 @@ import { spawn } from 'child_process';
 import * as http from 'http';
 import { logger } from '../logger';
 import { config as appConfig } from '../config';
+import { cliProcessRegistry } from '../processRegistry';
 import { buildPrompt, childProcessEnv, expandHome, readFileOrNull, resolveCommand } from '../utils';
 import { extractDelta } from '../streamParser';
 import { newCompletionId, sseChunk, sseDone, sseError } from '../sse';
@@ -30,6 +31,13 @@ import type { CliAgentWrapper, SseWriter } from './types';
 const sessionHistories = new Map<string, ChatMessage[]>();
 /** proxySessionId -> last hermes session_id we saw (so we can --resume). */
 const hermesSessionIds = new Map<string, string>();
+
+/** 会话被空闲超时释放后，清掉 hermes 侧的 per-session 缓存，
+ *  否则这两个 Map 会随会话数无限增长。 */
+export function releaseHermesSession(proxySessionId: string): void {
+  sessionHistories.delete(proxySessionId);
+  hermesSessionIds.delete(proxySessionId);
+}
 
 export class HermesProcessWrapper implements CliAgentWrapper {
   supports(type: string): boolean {
@@ -184,11 +192,14 @@ export class HermesProcessWrapper implements CliAgentWrapper {
     const env = childProcessEnv();
     const cwd = cfg.workingDir ? expandHome(cfg.workingDir) : process.cwd();
     logger.info(`Spawning hermes chat: command=${resolved} args=${JSON.stringify(baseArgs).slice(0, 200)}`);
-    return spawn(resolved, baseArgs, {
+    const proc = spawn(resolved, baseArgs, {
       env,
       cwd: cwd || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // 登记：proxy 退出 / 会话空闲超时 / 意外死亡都要能按会话找到它
+    cliProcessRegistry.register(req.sessionId, 'hermes', proc);
+    return proc;
   }
 
   // ──────────── HTTP gateway path (legacy fallback) ────────────

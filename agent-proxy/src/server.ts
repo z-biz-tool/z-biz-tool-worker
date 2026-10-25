@@ -32,6 +32,7 @@ export function createServer(deps: ServerDeps): http.Server {
       if (path === '/health') return handlers.health(req, res);
       if (path === '/v1/cli-agents') return handlers.cliList(req, res);
       if (path === '/v1/session/open') return handlers.session(req, res);
+      if (path === '/v1/sessions') return handlers.session(req, res);
       if (path === '/v1/chat/completions') return handlers.chat(req, res);
       if (path === '/' || path === '') {
         setCors(res);
@@ -40,6 +41,7 @@ export function createServer(deps: ServerDeps): http.Server {
           endpoints: [
             'GET  /v1/cli-agents',
             'POST /v1/session/open',
+            'GET  /v1/sessions',
             'POST /v1/chat/completions',
             'GET  /health',
           ],

@@ -15,11 +15,17 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
+use std::time::{Duration, Instant};
 
 pub struct AgentProxyHandle(pub Mutex<Option<Child>>);
 
 /// Default listen port — keep in sync with `agent-proxy/src/config.ts`.
 const DEFAULT_PORT: u16 = 9099;
+
+/// SIGTERM 整组之后、SIGKILL 整组之前的宽限期（秒）。
+/// agent-proxy 的 node 侧收到 SIGTERM 会先杀它拉起的 CLI 再退出，
+/// 给它一点时间把孙子的管道收干净，避免「优雅退出」变成二次 SIGKILL。
+const KILL_GRACE: Duration = Duration::from_secs(3);
 
 pub fn spawn() -> Result<Child, String> {
     if is_port_in_use(DEFAULT_PORT) {
@@ -63,8 +69,9 @@ pub fn spawn() -> Result<Child, String> {
     // Give it a moment to bind, then double-check the port.
     std::thread::sleep(std::time::Duration::from_millis(400));
     if !is_port_in_use(DEFAULT_PORT) {
-        let _ = child.kill();
-        let _ = child.wait();
+        // 也要走整组 kill：node 可能在绑端口之前就已经拉起了 CLI，
+        // 裸 child.kill() 只杀 node 自己，孙子会变孤儿继续烧 token。
+        kill(&mut child);
         return Err(format!(
             "agent-proxy exited before binding port {} (see logs above)",
             DEFAULT_PORT
@@ -74,7 +81,7 @@ pub fn spawn() -> Result<Child, String> {
     Ok(child)
 }
 
-/// Kill and reap a child process. Safe to call multiple times.
+/// Kill and reap the agent-proxy process tree. Safe to call multiple times.
 ///
 /// **杀的是整个进程组，不只是直接子进程。** agent-proxy 自己会再拉起
 /// claude / hermes / opencode 三个 CLI；只对直接子进程发 SIGKILL，
@@ -83,6 +90,14 @@ pub fn spawn() -> Result<Child, String> {
 ///
 /// 依赖 `put_in_own_process_group` 已经把子进程放进了自己的组；
 /// 因为 pgid == 子进程 pid，所以这里发信号绝不会误伤本进程。
+///
+/// 收尾顺序是「先礼后兵」：SIGTERM 整组 → 宽限 `KILL_GRACE` 秒 →
+/// SIGKILL 整组。node 侧（agent-proxy/src/index.ts）收到 SIGTERM 会
+/// 先杀它登记的 CLI 子进程再退出，留宽限期才不会把优雅退出掐断在半路。
+/// 宽限期过后无论 node 死没死都再补一次 SIGKILL 整组，保证没有漏网的孙子。
+///
+/// Windows 没有进程组信号这套，用 `taskkill /T` 杀进程树：
+/// 先不带 `/F`（礼貌），超宽限再 `/T /F`（强杀）。
 ///
 /// ⚠️ 2026-10-05 修正一个**比它要解决的问题严重得多**的 bug：
 /// 这里原先写的是 `libc::kill(-1, SIGKILL)`。`pid` 算出来了却没用上。
@@ -95,23 +110,88 @@ pub fn spawn() -> Result<Child, String> {
 /// 正确写法是 `kill(-pgid, sig)`，即 `killpg` 的语义。之所以一直没被发现，
 /// 是因为同文件里那条测试只断言「孙进程死了」—— 全场清场当然也能让孙进程死，
 /// **它测的是「有东西死了」，不是「该死的东西死了」**。现在补了「无关进程必须
-/// 活着」的反向断言。
+/// 活着」的反向断言，并且把 pid→-pgid 的换算收进纯函数 `group_signal_target`
+/// 用单测钉住（pid 为 0 时绝不允许发信号）。
 pub fn kill(child: &mut Child) {
     #[cfg(unix)]
     {
-        let pid = child.id() as libc::pid_t;
-        if pid > 0 {
+        if let Some(target) = group_signal_target(child.id()) {
             // 负 pid = 「发给进程组 -pid 的全体成员」。因为 `put_in_own_process_group`
             // 让 pgid == 子进程 pid，这里打到的正是我们拉起的那棵树。
-            // SAFETY: 只发信号，不共享内存；pid > 0 保证不会退化成 -1（那个语义是
-            // 「全部进程」）。子进程若已退出，这里拿到 ESRCH，无副作用。
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            // SAFETY: 只发信号，不共享内存；group_signal_target 保证 target < 0
+            // 且绝不等于 -1（那个语义是「全部进程」）。子进程若已退出，
+            // 这里拿到 ESRCH，无副作用。
+            unsafe { libc::kill(target, libc::SIGTERM) };
+            wait_group_leader(child, KILL_GRACE);
+            // 宽限期过后补刀：node 可能还在跑，某个 CLI 也可能单杀不死。
+            // 对空组再发一次 SIGKILL 只是 ESRCH，没有副作用。
+            unsafe { libc::kill(target, libc::SIGKILL) };
         }
+    }
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        // 先礼貌：taskkill 不带 /F，给进程树发 WM_CLOSE。
+        let _ = Command::new("taskkill")
+            .args(taskkill_tree_args(pid, false))
+            .stdin(Stdio::null())
+            .status();
+        wait_group_leader(child, KILL_GRACE);
+        // 再强杀：/T 整棵树，/F 强制执行。
+        let _ = Command::new("taskkill")
+            .args(taskkill_tree_args(pid, true))
+            .stdin(Stdio::null())
+            .status();
     }
     let _ = child.kill();
     // Wait so the OS reaps the process; otherwise we may leak a zombie
     // briefly. We swallow errors because the child may have exited already.
     let _ = child.wait();
+}
+
+/// 等进程组组长（直接子进程）退出，最多 `grace`。
+/// 已退出返回 true；超时还活着返回 false（调用方随后补 SIGKILL）。
+fn wait_group_leader(child: &mut Child, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return true, // 已经 wait 过/收不到了，当它死了
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// pid → `kill(2)` 的进程组目标参数：`-(pid as i32)`。
+///
+/// 之所以抽成纯函数：`kill(-1, sig)` 是「杀调用者全部进程」，
+/// 而 `kill(-pgid, sig)` 才是「杀这一组」—— 两者只差一个负号，
+/// 肉眼极难分辨，必须靠单测钉住。pid 为 0 时返回 `None`：
+/// 组号 0 的语义同样是「调用者所在组」，绝不能拿去发信号。
+pub fn group_signal_target(pid: u32) -> Option<i32> {
+    if pid == 0 {
+        return None;
+    }
+    // pid 来自 std::process::Child::id()，实际值远小于 i32::MAX。
+    let raw = pid as i32;
+    if raw <= 0 {
+        return None;
+    }
+    Some(-raw)
+}
+
+/// `taskkill` 杀进程树的参数。`force=false` 是先礼后兵的「礼」。
+/// 纯函数，任何平台都能测（编译和跑测试不依赖 Windows）。
+pub fn taskkill_tree_args(pid: u32, force: bool) -> Vec<String> {
+    let mut args = vec!["/T".to_string(), "/PID".to_string(), pid.to_string()];
+    if force {
+        args.push("/F".to_string());
+    }
+    args
 }
 
 // ──────────── helpers ────────────
@@ -130,8 +210,14 @@ fn put_in_own_process_group(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 fn put_in_own_process_group(_cmd: &mut Command) {
-    // Windows 上没有进程组这套说法；Taskkill 树形终止由打包/退出逻辑另行处理。
+    // Windows 上没有进程组这套说法；Taskkill 树形终止见 kill()。
 }
+
+// 父进程猝死（外部 SIGKILL / setup 后 panic）时 Rust 侧够不着的路径，
+// 由 agent-proxy 的 ppid 看门狗兜底（agent-proxy/src/index.ts）：
+// node 记下启动时的 ppid，发现父变了就杀光 CLI 再退出。
+// macOS 没有 PDEATHSIG，Windows 上又不宜为它引入 windows-sys 依赖，
+// 所以这个监护放在 Node 侧，一次实现覆盖 Unix 全家。
 
 fn pipe_to_stderr(prefix: &str, stream: impl Read + Send + 'static) {
     let reader = BufReader::new(stream);
@@ -515,6 +601,83 @@ mod tests {
             "组外进程 {bystander_pid} 被 kill() 连带杀掉了 —— \
              这正是 kill(-1, SIGKILL) 的语义（发给调用者的全部进程），\
              而正确行为只应作用于 -pgid 那一组"
+        );
+    }
+
+    /// pid → 进程组信号目标的换算。`kill(-1)` 事故（杀调用者全部进程）
+    /// 与 `kill(-pgid)`（杀这一组）只差一个负号，用纯函数 + 单测钉住。
+    #[test]
+    fn group_signal_target_maps_pid_to_negative_pgid() {
+        assert_eq!(group_signal_target(4242), Some(-4242));
+        assert_eq!(
+            group_signal_target(0),
+            None,
+            "pid 0 的语义同样是「调用者所在组」，绝不能拿去发信号"
+        );
+        // 生产路径上 target 绝不允许是 -1：那正是历史事故的语义
+        // （kill(-1) = 杀调用者名下的全部进程）。pid 1 除外 —— 它
+        // 换算出 -1 是数学必然，但 spawn 出来的子进程永远不可能是
+        // pid 1（1 号位永远是 init/launchd），所以到不了这条分支。
+        for pid in [2u32, 999, 65_535, 2_147_483_647] {
+            let target = group_signal_target(pid).expect("合法 pid 应有目标");
+            assert_eq!(target, -(pid as i32));
+            assert_ne!(target, -1, "target -1 会杀掉调用者名下的全部进程");
+        }
+        assert_eq!(group_signal_target(1), Some(-1));
+    }
+
+    /// `taskkill` 参数形状：/T 是树杀的关键，/F 只在强杀轮出现。
+    #[test]
+    fn taskkill_tree_args_shape() {
+        assert_eq!(taskkill_tree_args(1234, false), vec!["/T", "/PID", "1234"]);
+        assert_eq!(
+            taskkill_tree_args(1234, true),
+            vec!["/T", "/PID", "1234", "/F"]
+        );
+    }
+
+    /// kill() 必须先 SIGTERM、后 SIGKILL。用 trap 写 marker 来证：
+    /// 直接 SIGKILL 的话 trap 根本没机会跑，marker 永远不会出现。
+    ///
+    /// 子进程形状是 `sleep 300 & wait`：bash 3.2（macOS 的 /bin/sh）
+    /// 在**前台** sleep 期间会推迟执行 trap，必须用 `& wait` 让 wait
+    /// 可被信号打断，trap 才会跑。
+    #[cfg(unix)]
+    #[test]
+    fn kill_sends_sigterm_before_sigkill() {
+        let t = TempTree::new("sigterm-first");
+        let marker = t.path.join("term-marker");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!(
+                "trap 'echo term > \"{}\"' TERM; echo ready; sleep 300 & wait",
+                marker.display()
+            ))
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped());
+        put_in_own_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("起带 trap 的进程");
+
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("stdout"))
+            .read_line(&mut line)
+            .expect("读 ready 行");
+        assert_eq!(line.trim(), "ready", "前置条件：子进程应先打印 ready");
+
+        kill(&mut child);
+
+        let mut saw_marker = false;
+        for _ in 0..250 {
+            if marker.exists() {
+                saw_marker = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            saw_marker,
+            "kill() 应当先发 SIGTERM（trap 有机会写 marker），再发 SIGKILL"
         );
     }
 

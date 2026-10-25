@@ -19,6 +19,11 @@ export interface AppConfig {
   opencodeServerUrl: string;
   /** Subprocess timeout for fallback path. */
   processTimeoutMs: number;
+  /** Session idle timeout: an idle session's CLI is killed and released.
+   *  Overridable via AGENT_SESSION_IDLE_MS. */
+  sessionIdleMs: number;
+  /** Grace between SIGTERM and SIGKILL when reaping CLI processes. */
+  cliKillGraceMs: number;
   /** Anthropic-compatible base URL injected into claude-code child process. */
   anthropicBaseUrl: string;
   /** Default model name injected into claude-code when config omits --model. */
@@ -33,6 +38,19 @@ const HERMES_API_KEY_FILE = '/tmp/hermes_api_key.txt';
 const ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic';
 const DEFAULT_CLAUDE_MODEL = 'MiniMax-M3';
 const PROCESS_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+/** AGENT_SESSION_IDLE_MS 缺省：30 分钟。 */
+export const DEFAULT_SESSION_IDLE_MS = 30 * 60 * 1000;
+const CLI_KILL_GRACE_MS = 3_000;
+
+/** 解析 AGENT_SESSION_IDLE_MS。纯函数，便于单测。
+ *  非法值（非数字 / <= 0）回落默认值 —— 一个错别字不该把超时关掉，
+ *  那等于让孤儿 CLI 无限期烧 token。 */
+export function parseIdleMs(raw: string | undefined): number {
+  if (raw == null || raw.trim().length === 0) return DEFAULT_SESSION_IDLE_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_SESSION_IDLE_MS;
+  return Math.floor(n);
+}
 
 function parsePort(): number {
   const flag = process.argv.find((a) => a === '--port' || a.startsWith('--port='));
@@ -64,6 +82,8 @@ export const config: AppConfig = {
   hermesApiKeyFile: HERMES_API_KEY_FILE,
   opencodeServerUrl: OPENCODE_SERVER_URL,
   processTimeoutMs: PROCESS_TIMEOUT_MS,
+  sessionIdleMs: parseIdleMs(process.env.AGENT_SESSION_IDLE_MS),
+  cliKillGraceMs: CLI_KILL_GRACE_MS,
   anthropicBaseUrl: ANTHROPIC_BASE_URL,
   defaultClaudeModel: DEFAULT_CLAUDE_MODEL,
 };

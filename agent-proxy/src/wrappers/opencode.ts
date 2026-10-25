@@ -13,6 +13,12 @@ import type { CliAgentWrapper, SseWriter } from './types';
 
 const opencodeSessions = new Map<string, string>();
 
+/** 会话被空闲超时释放后，清掉 proxySessionId -> opencode session 的缓存。
+ *  注意这只释放 proxy 侧映射；opencode server 上的 session 由它自己管理。 */
+export function releaseOpencodeSession(proxySessionId: string): void {
+  opencodeSessions.delete(proxySessionId);
+}
+
 export class OpencodeProcessWrapper implements CliAgentWrapper {
   supports(type: string): boolean {
     return type === 'opencode';

@@ -73,6 +73,15 @@ pub fn run() {
             }
             Ok(())
         })
+        // 单窗口应用：关窗即退出。macOS 上默认关窗只隐藏窗口、应用驻留 Dock，
+        // 那条路径上 RunEvent::Exit 不触发，agent-proxy 和它拉起的 CLI
+        // 会继续跑、继续烧 token。exit(0) 会正常走完事件循环并触发
+        // RunEvent::Exit，那里负责杀进程组。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                window.app_handle().exit(0);
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

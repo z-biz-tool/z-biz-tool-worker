@@ -6,6 +6,7 @@
 import { spawn } from 'child_process';
 import { logger } from '../logger';
 import { config as appConfig } from '../config';
+import { cliProcessRegistry } from '../processRegistry';
 import {
   buildPrompt,
   childProcessEnv,
@@ -21,6 +22,12 @@ import type { CliAgentWrapper, SseWriter } from './types';
 /** Map of session IDs that have already been started; used to switch between
  *  --session-id (first request) and --resume (subsequent). */
 const activeSessions = new Set<string>();
+
+/** 会话被空闲超时释放后，从 --resume 集合里摘掉，
+ *  下次同 id 请求会以 --session-id 重新起。 */
+export function releaseClaudeSession(sessionId: string): void {
+  activeSessions.delete(sessionId);
+}
 
 export class ClaudeCodeWrapper implements CliAgentWrapper {
   supports(type: string): boolean {
@@ -173,11 +180,14 @@ export class ClaudeCodeWrapper implements CliAgentWrapper {
 
     logger.info(`Spawning Claude Code: command=${resolved} args=${JSON.stringify(args)}`);
     const cwd = cfg.workingDir ? expandHome(cfg.workingDir) : undefined;
-    return spawn(resolved, args, {
+    const proc = spawn(resolved, args, {
       env,
       cwd: cwd || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // 登记：proxy 退出 / 会话空闲超时 / 意外死亡都要能按会话找到它
+    cliProcessRegistry.register(sessionId, 'claude-code', proc);
+    return proc;
   }
 
   private resolveArgs(cfg: CliAgentConfig, prompt: string): string[] {

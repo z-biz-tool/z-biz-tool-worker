@@ -5,6 +5,8 @@
 import { spawn } from 'child_process';
 import { logger } from './logger';
 import { config as appConfig } from './config';
+import { cliProcessRegistry } from './processRegistry';
+import type { CliProcessRegistry } from './processRegistry';
 import { buildPrompt, childProcessEnv, expandHome, resolveCommand } from './utils';
 import { extractDelta } from './streamParser';
 import { CliAgentWrapperRegistry } from './wrappers/registry';
@@ -13,13 +15,18 @@ import type { CliAgentConfig, ChatCompletionRequest } from './types';
 import type { SseWriter } from './wrappers/types';
 
 export class CliChatExecutor {
-  constructor(private registry: CliAgentWrapperRegistry) {}
+  constructor(
+    private registry: CliAgentWrapperRegistry,
+    /** CLI 子进程登记表。默认用进程级单例；测试可注入隔离实例。 */
+    private procs: CliProcessRegistry = cliProcessRegistry
+  ) {}
 
   async executeStream(
     cfg: CliAgentConfig,
     req: ChatCompletionRequest,
     sse: SseWriter
   ): Promise<string> {
+    this.procs.touch(req.sessionId);
     const w = this.registry.get(cfg.type);
     if (w) {
       logger.info(`Delegating stream to ${w.constructor.name} for type=${cfg.type}`);
@@ -30,6 +37,7 @@ export class CliChatExecutor {
   }
 
   async executeSync(cfg: CliAgentConfig, req: ChatCompletionRequest): Promise<string> {
+    this.procs.touch(req.sessionId);
     const w = this.registry.get(cfg.type);
     if (w) {
       logger.info(`Delegating sync to ${w.constructor.name} for type=${cfg.type}`);
@@ -50,7 +58,7 @@ export class CliChatExecutor {
     const completionId = newCompletionId();
     const created = Math.floor(Date.now() / 1000);
     const model = cfg.type;
-    const proc = this.spawnProcess(cfg, prompt);
+    const proc = this.spawnProcess(cfg, prompt, req.sessionId);
     let full = '';
     proc.stdout.on('data', (b) => {
       for (const line of b.toString('utf-8').split(/\r?\n/)) {
@@ -75,7 +83,7 @@ export class CliChatExecutor {
 
   private async fallbackSync(cfg: CliAgentConfig, req: ChatCompletionRequest): Promise<string> {
     const prompt = buildPrompt(req.messages);
-    const proc = this.spawnProcess(cfg, prompt);
+    const proc = this.spawnProcess(cfg, prompt, req.sessionId);
     let full = '';
     let stderr = '';
     proc.stdout.on('data', (b) => {
@@ -93,7 +101,7 @@ export class CliChatExecutor {
     return full;
   }
 
-  private spawnProcess(cfg: CliAgentConfig, prompt: string) {
+  private spawnProcess(cfg: CliAgentConfig, prompt: string, sessionId?: string) {
     const resolved = resolveCommand(cfg.command) || cfg.command;
     const args = (cfg.args || []).map((a) => a.replace(/\{prompt\}/g, prompt));
     const env = childProcessEnv();
@@ -101,11 +109,14 @@ export class CliChatExecutor {
     logger.info(
       `Spawning CLI agent (fallback): command=${resolved} args=${JSON.stringify(args)} type=${cfg.type}`
     );
-    return spawn(resolved, args, {
+    const proc = spawn(resolved, args, {
       env,
       cwd: cwd || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // 登记：退出/空闲超时/意外死亡都要能按会话找到它
+    this.procs.register(sessionId, `fallback:${cfg.type}`, proc);
+    return proc;
   }
 }
 
