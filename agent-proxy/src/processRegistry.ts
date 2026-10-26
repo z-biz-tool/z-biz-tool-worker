@@ -215,6 +215,27 @@ export class CliProcessRegistry {
     return results.filter(Boolean).length;
   }
 
+  /**
+   * 显式关闭一个会话：杀掉它的 CLI、标记 ended、触发 wrapper 缓存清理。
+   *
+   * 用于「Agent 被删除」—— 只删数据库行而不管会话，CLI 会一直挂到
+   * 空闲超时（默认 30 分钟）才被回收，这期间仍在占内存/可能烧 token。
+   * 返回杀掉的 CLI 个数。
+   */
+  async closeSession(sessionId: string): Promise<number> {
+    const killed = await this.killSession(sessionId);
+    this.lastActivity.delete(sessionId);
+    this.setStatus(sessionId, 'ended', 'session closed');
+    for (const hook of this.releaseHooks) {
+      try {
+        hook(sessionId);
+      } catch (e) {
+        logger.warn('release hook failed for session', sessionId, ':', e);
+      }
+    }
+    return killed;
+  }
+
   /** 先礼后兵：SIGTERM，宽限内没退再 SIGKILL，等到真退出才 resolve。
    *  没在跑返回 false。 */
   private async termThenKill(proc: ChildProcess): Promise<boolean> {

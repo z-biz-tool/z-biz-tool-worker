@@ -146,7 +146,7 @@ export interface UpdateTaskParams {
   start_date?: string;
   due_date?: string;
   milestone?: boolean;
-  assigned_agent_id?: string;
+  assigned_agent_id?: string | null;
   tags?: string[];
   sort_order?: number;
   custom_fields?: Record<string, unknown>;

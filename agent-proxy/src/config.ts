@@ -24,6 +24,8 @@ export interface AppConfig {
   sessionIdleMs: number;
   /** Grace between SIGTERM and SIGKILL when reaping CLI processes. */
   cliKillGraceMs: number;
+  /** How often the ppid watchdog checks whether the Tauri parent died. */
+  parentWatchMs: number;
   /** Anthropic-compatible base URL injected into claude-code child process. */
   anthropicBaseUrl: string;
   /** Default model name injected into claude-code when config omits --model. */
@@ -41,6 +43,17 @@ const PROCESS_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
 /** AGENT_SESSION_IDLE_MS 缺省：30 分钟。 */
 export const DEFAULT_SESSION_IDLE_MS = 30 * 60 * 1000;
 const CLI_KILL_GRACE_MS = 3_000;
+export const DEFAULT_PARENT_WATCH_MS = 10_000;
+
+/** 解析 AGENT_PROXY_PARENT_WATCH_MS。纯函数，便于单测。
+ *  默认 10s（缩短父进程猝死到回收之间的窗口）；测试可压到几百毫秒。
+ *  非法值同样回落默认值 —— 看门狗不能被一个错别字关掉。 */
+export function parseParentWatchMs(raw: string | undefined): number {
+  if (raw == null || raw.trim().length === 0) return DEFAULT_PARENT_WATCH_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PARENT_WATCH_MS;
+  return Math.max(100, Math.floor(n));
+}
 
 /** 解析 AGENT_SESSION_IDLE_MS。纯函数，便于单测。
  *  非法值（非数字 / <= 0）回落默认值 —— 一个错别字不该把超时关掉，
@@ -84,6 +97,7 @@ export const config: AppConfig = {
   processTimeoutMs: PROCESS_TIMEOUT_MS,
   sessionIdleMs: parseIdleMs(process.env.AGENT_SESSION_IDLE_MS),
   cliKillGraceMs: CLI_KILL_GRACE_MS,
+  parentWatchMs: parseParentWatchMs(process.env.AGENT_PROXY_PARENT_WATCH_MS),
   anthropicBaseUrl: ANTHROPIC_BASE_URL,
   defaultClaudeModel: DEFAULT_CLAUDE_MODEL,
 };

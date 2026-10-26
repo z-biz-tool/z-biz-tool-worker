@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -32,6 +33,12 @@ impl AgentSessionState {
     /// Load from the default location (`~/.local/share/future-team/agent-sessions.json`).
     pub fn load() -> Self {
         let path = persist_path();
+        // 只对**默认目录**收紧权限；`load_from` 的调用方（测试/自定义存储）
+        // 可能把文件放在 /tmp 这类共享目录里，改它的权限会误伤别人。
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            restrict_mode(dir, 0o700);
+        }
         let inner = match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             Err(_) => Persisted::default(),
@@ -70,16 +77,15 @@ impl AgentSessionState {
         sid
     }
 
-    pub fn cli_type_for(&self, agent_id: &str) -> String {
-        self.cli_type_override(agent_id)
-            .unwrap_or_else(|| "claude-code".to_string())
-    }
-
     /// 用户**显式覆盖**过的 CLI 类型（`set_agent_cli_type` 写的）。
     ///
     /// ⚠ 旧实现里根本没有这个概念：`cli_type_for` 直接读 `cli_types` 表，
     /// 而那张表**从来没人写过**（`set_agent_cli_type` 前端一次都没调）
     /// ⇒ 对话**永远**路由到 `claude-code`。
+    ///
+    /// 生产路径统一走 `resolve_cli_type`（它一次性读表并合并 Agent 自声明），
+    /// 这个单字段读取只留给测试断言用。
+    #[cfg(test)]
     pub fn cli_type_override(&self, agent_id: &str) -> Option<String> {
         let g = self.inner.lock().expect("agent-session mutex poisoned");
         g.cli_types.get(agent_id).cloned()
@@ -90,6 +96,18 @@ impl AgentSessionState {
         g.cli_types
             .insert(agent_id.to_string(), cli_type.to_string());
         save(&g, &self.path);
+    }
+
+    /// 删掉某个 Agent 的全部本地记录，返回它原来的对话会话 id。
+    ///
+    /// 用于「Agent 被删除」：会话 id 还要拿去让代理**杀掉对应的 CLI**。
+    /// 只删数据库行不管会话的话，CLI 会挂到空闲超时（默认 30 分钟）才回收。
+    pub fn forget(&self, agent_id: &str) -> Option<String> {
+        let mut g = self.inner.lock().expect("agent-session mutex poisoned");
+        let session = g.sessions.remove(agent_id);
+        g.cli_types.remove(agent_id);
+        save(&g, &self.path);
+        session
     }
 
     /// 列出所有 agent→session 绑定。
@@ -261,13 +279,52 @@ struct ChatChoiceMessage {
 
 // ──────────── helpers ────────────
 
+/// 收紧文件/目录权限（W-24）。
+///
+/// `agent-sessions.json` 里是 agent id、代理会话 uuid 与 CLI 覆盖值 ——
+/// **不含** system_prompt、API key 或对话正文。但它仍属本机运行痕迹，
+/// 不该让同机其他用户读到：文件 0600、目录 0700。
+#[cfg(unix)]
+fn restrict_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_mode(mode);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_mode(_path: &Path, _mode: u32) {}
+
 fn save(p: &Persisted, path: &PathBuf) {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[agent-session] 建目录失败 {}: {e}", dir.display());
+            return;
+        }
     }
-    if let Ok(text) = serde_json::to_string_pretty(p) {
-        let _ = std::fs::write(path, text);
+    let Ok(text) = serde_json::to_string_pretty(p) else {
+        eprintln!("[agent-session] 序列化失败，本次绑定未落盘");
+        return;
+    };
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    match opts.open(path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(text.as_bytes()) {
+                eprintln!("[agent-session] 写 {} 失败: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("[agent-session] 打开 {} 失败: {e}", path.display()),
+    }
+    // 文件已存在时 `mode()` 不生效，补一次 chmod。
+    restrict_mode(path, 0o600);
 }
 
 fn persist_path() -> PathBuf {
@@ -290,12 +347,47 @@ pub fn get_agent_session(
 ) -> Result<AgentSessionInfo, String> {
     let state = app.state::<AgentSessionState>();
     let sid = state.get_or_create(&agent_id);
-    let cli_type = state.cli_type_for(&agent_id);
+    // 报**生效中**的类型（覆盖 > Agent 自声明 > claude-code）。
+    // 原先走 `cli_type_for`（只看覆盖表）⇒ 卡片写 Hermes 的 Agent 在对话框里
+    // 显示成 claude-code，用户一按保存就把覆盖值真的改成 claude-code 了。
+    let declared = crate::storage::find_agent(&agent_id).and_then(|a| a.cli_type);
+    let cli_type = resolve_cli_type(&state, declared.as_deref(), &agent_id);
     Ok(AgentSessionInfo {
         agent_id,
         session_id: sid,
         cli_type,
     })
+}
+
+/// 让 agent-proxy 关掉一个会话（杀掉它拉起的 CLI）。
+///
+/// Agent 被删除时调用。代理没起 / 版本不支持该端点时返回 Err ——
+/// 调用方**只记日志、不假装成功**：CLI 仍会在空闲超时后被回收。
+pub async fn close_proxy_session(session_id: &str) -> Result<usize, String> {
+    let url = format!("{}/v1/session/close", proxy_url());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "sessionId": session_id }))
+        .send()
+        .await
+        .map_err(|e| format!("proxy unreachable: {e}"))?;
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("proxy returned HTTP {}: {}", status, raw));
+    }
+    #[derive(Deserialize)]
+    struct CloseResponse {
+        #[serde(default)]
+        closed: usize,
+    }
+    let parsed: CloseResponse =
+        serde_json::from_str(&raw).map_err(|e| format!("parse response: {e}; body={raw}"))?;
+    Ok(parsed.closed)
 }
 
 /// Tauri command: set the CLI type (claude-code / hermes / opencode) for an
@@ -392,7 +484,7 @@ mod tests {
 
         let agent_id = "test-worker-1";
         let sid1 = state.get_or_create(agent_id);
-        let cli_type = state.cli_type_for(agent_id);
+        let cli_type = resolve_cli_type(&state, None, agent_id);
 
         // turn 1: ask the agent to remember a word
         let reply1 = chat(
@@ -455,8 +547,64 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// **生效中的 CLI 类型**的三层优先级（纯函数，逐条钉住）。
-    ///
+    /// W-01：删除 Agent 时 `forget` 要返回会话 id（供代理杀 CLI），并清掉本地绑定。
+    #[test]
+    fn forget_removes_binding_and_returns_session_for_cleanup() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agent-session-forget-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let state = AgentSessionState::load_from(tmp.clone());
+        let sid = state.get_or_create("agent-A");
+        state.set_cli_type("agent-A", "hermes");
+
+        let removed = state.forget("agent-A");
+        assert_eq!(removed.as_deref(), Some(sid.as_str()), "要返回会话 id 去关 CLI");
+        assert_eq!(state.cli_type_override("agent-A"), None);
+        assert_eq!(state.forget("agent-A"), None, "重复删除不应报错");
+
+        // 删完后再用同一个 agent id，必须拿到**新**会话（旧会话已被代理关掉）
+        let sid2 = state.get_or_create("agent-A");
+        assert_ne!(sid, sid2);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// W-24：落盘文件 0600，且**不含** system_prompt / API key / 对话正文。
+    #[cfg(unix)]
+    #[test]
+    fn session_file_is_private_and_contains_no_prompts_or_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "agent-session-perm-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("agent-sessions.json");
+        let state = AgentSessionState::load_from(path.clone());
+        let sid = state.get_or_create("agent-A");
+        state.set_cli_type("agent-A", "opencode");
+
+        let mode = std::fs::metadata(&path)
+            .expect("文件应已写出")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "agent-sessions.json 必须是 0600");
+
+        let raw = std::fs::read_to_string(&path).expect("读文件");
+        assert!(raw.contains(&sid), "会话 id 应被持久化");
+        assert!(raw.contains("opencode"), "CLI 覆盖值应被持久化");
+        for forbidden in ["system_prompt", "api_key", "sk-", "content"] {
+            assert!(
+                !raw.contains(forbidden),
+                "会话文件不应包含 {forbidden}：{raw}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **生效中的 CLI 类型**的三层优先级（纯函数，逐条钉住）。    ///
     /// ⚠ 这条规则是本轮修的一个真 bug 的核心：
     /// 旧实现只认「用户覆盖」那一层，而覆盖表**从来没人写过**
     /// ⇒ 对话**永远**路由到 claude-code

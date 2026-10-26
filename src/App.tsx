@@ -309,10 +309,17 @@ export default function App() {
                         if (key === "rename") openRename(p);
                         if (key === "del") {
                           Modal.confirm({
-                            title: `删除项目 "${p.name}"?`,
-                            content: "该项目的任务与 Agent 会一并删除。",
+                            title: `删除项目「${p.name}」？`,
+                            content: "该项目的任务、Agent、文档与标签会一并删除，无法恢复。",
+                            okText: "删除",
+                            cancelText: "取消",
                             okButtonProps: { danger: true },
-                            onOk: () => store.deleteProject(p.id),
+                            autoFocusButton: "cancel",
+                            onOk: async () => {
+                              const ok = await store.deleteProject(p.id);
+                              if (!ok) throw new Error("delete project failed");
+                              message.success("项目已删除");
+                            },
                           });
                         }
                       },
@@ -323,6 +330,7 @@ export default function App() {
                       type="text"
                       size="small"
                       icon={<SettingOutlined />}
+                      aria-label={`管理项目「${p.name}」`}
                       onClick={(e) => e.stopPropagation()}
                     />
                   </Dropdown>
@@ -341,7 +349,7 @@ export default function App() {
 
   const renderContent = () => {
     if (currentView === "settings") {
-      return <Settings onBack={() => setView("kanban")} />;
+      return <Settings onBack={() => setView("kanban")} projectId={store.currentProjectId} />;
     }
 
     if (!currentProject) {
@@ -481,9 +489,17 @@ export default function App() {
                       onClick: async ({ key }) => {
                         if (key === "del") {
                           Modal.confirm({
-                            title: `删除 Agent "${a.name}"?`,
+                            title: `删除 Agent「${a.name}」？`,
+                            content: "该 Agent 会从项目移除，并通知代理关闭它拉起的 CLI 会话；此操作无法恢复。",
+                            okText: "删除",
+                            cancelText: "取消",
                             okButtonProps: { danger: true },
-                            onOk: () => store.deleteAgent(a.id),
+                            autoFocusButton: "cancel",
+                            onOk: async () => {
+                              const ok = await store.deleteAgent(a.id);
+                              if (!ok) throw new Error("delete agent failed");
+                              message.success(`已删除 ${a.name}`);
+                            },
                           });
                         }
                         if (key === "clone") {
@@ -497,7 +513,12 @@ export default function App() {
                     }}
                     trigger={["click"]}
                   >
-                    <Button type="text" size="small" icon={<SettingOutlined />} />
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<SettingOutlined />}
+                      aria-label={`管理 Agent「${a.name}」`}
+                    />
                   </Dropdown>
                 </div>
                 <div style={{ marginTop: 8, fontSize: 11, color: "#999" }}>
@@ -556,9 +577,11 @@ export default function App() {
   return (
     <Layout style={{ height: "100vh" }}>
       {sider}
-      <Layout>
+      {/* minWidth:0 是这里的关键：antd Layout 是 flex 项，默认 min-width:auto，
+          900px 窗宽下看板内容会把整个页面撑出横向滚动条，而不是在内容区内部滚 */}
+      <Layout style={{ minWidth: 0 }}>
         {currentProject && currentView !== "settings" && (
-          <div style={{ padding: "12px 12px 0" }}>
+          <div style={{ padding: "12px 12px 0", minWidth: 0 }}>
             <TopBar
               projectName={currentProject.name}
               searchInputRef={searchInputRef}
@@ -720,6 +743,7 @@ function ImportLocalAgentModal(props: {
   const { open, onClose, onImport, alreadyImported } = props;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [list, setList] = useState<LocalAgentInfo[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
@@ -744,12 +768,25 @@ function ImportLocalAgentModal(props: {
   const handleOk = async () => {
     if (selected.size === 0) return message.warning("请至少勾选一个");
     setImporting(true);
+    setImportError(null);
+    const failed: string[] = [];
     try {
       for (const cli of list) {
-        if (selected.has(cli.type)) await onImport(cli);
+        if (!selected.has(cli.type)) continue;
+        try {
+          await onImport(cli);
+        } catch (e: any) {
+          failed.push(`${CLI_LABELS[cli.type]?.label || cli.type}：${e?.toString?.() || e}`);
+        }
       }
-      onClose();
-    } catch {} finally {
+      if (failed.length === 0) {
+        onClose();
+        return;
+      }
+      // 旧实现 catch {} 把失败吞掉：弹窗不关、也不说为什么，看着像卡住了。
+      setImportError(`以下 ${failed.length} 个 Agent 引入失败：${failed.join("；")}`);
+      message.warning(`已引入 ${selected.size - failed.length} 个，${failed.length} 个失败`);
+    } finally {
       setImporting(false);
     }
   };
@@ -768,6 +805,17 @@ function ImportLocalAgentModal(props: {
         <Text type="secondary">扫描本机已安装的 CLI: claude-code / hermes / opencode</Text>
         <Button size="small" icon={<ApiOutlined />} onClick={refresh} loading={loading}>重新探测</Button>
       </div>
+      {importError && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="部分 Agent 未引入"
+          description={importError}
+          closable
+          onClose={() => setImportError(null)}
+        />
+      )}
       {loading ? (
         <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
       ) : error ? (

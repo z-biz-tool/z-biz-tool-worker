@@ -71,25 +71,32 @@ export default function TopBar({ projectName, searchInputRef, filteredCount, tot
         background: cardBgGradient,
         borderRadius: 16,
         marginBottom: 12,
+        minWidth: 0,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flexWrap: "wrap" }}>
         <div
           style={{
             fontWeight: 600,
             fontSize: 15,
             whiteSpace: "nowrap",
+            flexShrink: 0,
+            maxWidth: 120,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
             background: brandGradient,
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
             backgroundImage: brandGradient,
           }}
+          title={projectName}
         >
           {projectName}
         </div>
 
-        <div style={{ flex: 1, display: "flex", justifyContent: "center" }}>
-          <Space size={4}>
+        {/* 900px 窗宽放不下 7 个页签 + 搜索栏：页签折行，当前页签永远可见 */}
+        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexWrap: "wrap", justifyContent: "flex-start" }}>
+          <Space size={4} wrap>
             {VIEW_OPTIONS.map((v, i) => (
               <Tooltip key={v.key} title={`${v.label} (⌘${i + 1})`}>
                 <Button
@@ -110,7 +117,7 @@ export default function TopBar({ projectName, searchInputRef, filteredCount, tot
           </Space>
         </div>
 
-        <Space size={8}>
+        <Space size={8} style={{ flexShrink: 0 }}>
           <Input
             ref={searchInputRef}
             prefix={<SearchOutlined style={{ color: "var(--ant-color-text-tertiary)" }} />}
@@ -118,7 +125,9 @@ export default function TopBar({ projectName, searchInputRef, filteredCount, tot
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
-              width: 180,
+              width: 150,
+              minWidth: 100,
+              flex: "0 1 150px",
               borderRadius: 10,
               transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
             }}
@@ -130,6 +139,7 @@ export default function TopBar({ projectName, searchInputRef, filteredCount, tot
               type="text"
               size="small"
               icon={<ReloadOutlined />}
+              aria-label="刷新当前项目"
               loading={loading}
               onClick={() => {
                 if (currentProjectId) void selectProject(currentProjectId);
@@ -143,6 +153,7 @@ export default function TopBar({ projectName, searchInputRef, filteredCount, tot
               type="text"
               size="small"
               icon={<SettingOutlined />}
+              aria-label="打开设置"
               onClick={() => setView("settings")}
               style={{ borderRadius: 8 }}
             />

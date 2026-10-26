@@ -68,9 +68,9 @@ export default function CalendarView({ tasks }: CalendarViewProps) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <Space>
-          <Button icon={<LeftOutlined />} onClick={prevMonth} />
+          <Button icon={<LeftOutlined />} aria-label="上个月" onClick={prevMonth} />
           <Text strong style={{ fontSize: 16 }}>{year}年 {month + 1}月</Text>
-          <Button icon={<RightOutlined />} onClick={nextMonth} />
+          <Button icon={<RightOutlined />} aria-label="下个月" onClick={nextMonth} />
         </Space>
         <Button icon={<TodayOutlined />} onClick={() => setCurrentDate(new Date())}>
           今天

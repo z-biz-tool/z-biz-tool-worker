@@ -260,7 +260,10 @@ pub struct UpdateTaskParams {
     pub start_date: Option<String>,
     pub due_date: Option<String>,
     pub milestone: Option<bool>,
-    pub assigned_agent_id: Option<String>,
+    /// 双层 Option：缺省（JSON 无此字段）= 不改；`null` = 显式解除分配。
+    /// 单层 Option 会把 null 与缺省都折叠成 None，界面上的「清除分配」
+    /// 就成了点了没反应的死按钮。
+    pub assigned_agent_id: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub sort_order: Option<i32>,
     pub custom_fields: Option<serde_json::Value>,

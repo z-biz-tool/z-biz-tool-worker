@@ -4,17 +4,19 @@ import * as http from 'http';
 import { logger } from './logger';
 import { handleHealth } from './handlers/health';
 import { makeCliListHandler } from './handlers/cliList';
-import { makeSessionHandler } from './handlers/session';
+import { makeSessionHandler, makeSessionCloseHandler } from './handlers/session';
 import { makeChatHandler } from './handlers/chat';
 import { sendError, setCors } from './handlers/common';
 import type { AgentRegistry } from './agentRegistry';
 import type { CliChatExecutor } from './executor';
 import type { SessionRegistry } from './sessionRegistry';
+import type { CliProcessRegistry } from './processRegistry';
 
 export interface ServerDeps {
   agentRegistry: AgentRegistry;
   sessionRegistry: SessionRegistry;
   executor: CliChatExecutor;
+  processRegistry: CliProcessRegistry;
 }
 
 export function createServer(deps: ServerDeps): http.Server {
@@ -22,6 +24,7 @@ export function createServer(deps: ServerDeps): http.Server {
     health: handleHealth,
     cliList: makeCliListHandler(deps.agentRegistry),
     session: makeSessionHandler(deps.sessionRegistry),
+    sessionClose: makeSessionCloseHandler(deps.sessionRegistry, deps.processRegistry),
     chat: makeChatHandler(deps.agentRegistry, deps.executor, deps.sessionRegistry),
   };
 
@@ -32,6 +35,7 @@ export function createServer(deps: ServerDeps): http.Server {
       if (path === '/health') return handlers.health(req, res);
       if (path === '/v1/cli-agents') return handlers.cliList(req, res);
       if (path === '/v1/session/open') return handlers.session(req, res);
+      if (path === '/v1/session/close') return handlers.sessionClose(req, res);
       if (path === '/v1/sessions') return handlers.session(req, res);
       if (path === '/v1/chat/completions') return handlers.chat(req, res);
       if (path === '/' || path === '') {
@@ -41,6 +45,7 @@ export function createServer(deps: ServerDeps): http.Server {
           endpoints: [
             'GET  /v1/cli-agents',
             'POST /v1/session/open',
+            'POST /v1/session/close',
             'GET  /v1/sessions',
             'POST /v1/chat/completions',
             'GET  /health',

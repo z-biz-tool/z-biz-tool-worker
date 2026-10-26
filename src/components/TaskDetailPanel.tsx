@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
 import {
   Drawer, Input, Select, DatePicker, Tag, Space, Button, Typography, Divider,
-  Avatar, List, message, Checkbox, Collapse, Empty,
+  Avatar, message, Checkbox, Modal, Spin, Alert,
 } from "antd";
 import {
-  UserOutlined, DeleteOutlined, ClockCircleOutlined,
+  DeleteOutlined, ClockCircleOutlined,
   CheckCircleOutlined, PlayCircleOutlined, EyeOutlined, PauseCircleOutlined,
   LinkOutlined, FlagOutlined, PlusOutlined,
 } from "@ant-design/icons";
@@ -57,14 +57,24 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
   const [newTag, setNewTag] = useState("");
   const [editingDesc, setEditingDesc] = useState(false);
   const [descValue, setDescValue] = useState("");
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
   const loadMessages = async () => {
+    setMessagesLoading(true);
+    setMessagesError(null);
     try {
       const msgs = await invoke<TaskMessage[]>("get_task_messages", { taskId: task.id });
       setMessages(msgs);
-    } catch (e: any) {
+    } catch (e) {
+      // 不能把加载失败画成「暂无对话」——那是在编故事。
       setMessages([]);
-      message.error(`加载任务消息失败：${e?.toString?.() || e}`);
+      setMessagesError(errorText(e));
+    } finally {
+      setMessagesLoading(false);
     }
   };
 
@@ -108,11 +118,52 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
   };
 
   const handlePriorityChange = async (priority: number) => {
-    await store.updateTask(task.id, { priority });
+    if (await store.updateTask(task.id, { priority })) message.success("优先级已更新");
   };
 
   const handleDateChange = async (field: "start_date" | "due_date", date: dayjs.Dayjs | null) => {
-    await store.updateTask(task.id, { [field]: date ? date.format("YYYY-MM-DD") : null });
+    const ok = await store.updateTask(task.id, { [field]: date ? date.format("YYYY-MM-DD") : null });
+    if (ok) message.success(field === "due_date" ? "截止日期已更新" : "开始日期已更新");
+  };
+
+  const handleAssignChange = async (agentId?: string) => {
+    if (agentId) {
+      if (await store.assignTask(task.id, agentId)) message.success("已分配 Agent");
+      return;
+    }
+    // 清除分配原来是个**点了没反应的死按钮**（只处理 truthy 值）。
+    // 解除后任务不再自动执行，属于会改变行为的操作，先讲清后果。
+    Modal.confirm({
+      title: `解除「${task.title}」的 Agent 分配？`,
+      content: "解除后该任务不再自动执行；已有的对话与产出会保留。",
+      okText: "解除分配",
+      cancelText: "保留",
+      autoFocusButton: "cancel",
+      onOk: async () => {
+        const ok = await store.updateTask(task.id, { assigned_agent_id: null });
+        if (!ok) throw new Error("clear assignment failed");
+        message.success("已解除分配");
+      },
+    });
+  };
+
+  const handleDeleteTask = () => {
+    Modal.confirm({
+      title: `删除任务「${task.title}」？`,
+      content: "该任务的对话、依赖与附件记录会一并删除，无法恢复。",
+      okText: "删除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      autoFocusButton: "cancel",
+      onOk: async () => {
+        setDeleting(true);
+        const ok = await store.deleteTask(task.id);
+        setDeleting(false);
+        if (!ok) throw new Error("delete failed"); // 失败时保留弹窗与任务，不假装删掉
+        message.success("任务已删除");
+        onClose();
+      },
+    });
   };
 
   const handleMilestoneToggle = async () => {
@@ -203,7 +254,7 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
           >
             {task.milestone ? "已里程碑" : "设为里程碑"}
           </Button>
-          <Button danger icon={<DeleteOutlined />} onClick={() => { store.deleteTask(task.id); onClose(); }}>
+          <Button danger icon={<DeleteOutlined />} loading={deleting} onClick={handleDeleteTask}>
             删除
           </Button>
         </Space>
@@ -226,7 +277,7 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
         <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: "block" }}>分配给</Text>
         <Select
           value={task.assigned_agent_id || undefined}
-          onChange={async (agentId: string) => { if (agentId) await store.assignTask(task.id, agentId); }}
+          onChange={handleAssignChange}
           style={{ width: "100%" }}
           placeholder="选择 Agent"
           allowClear
@@ -362,7 +413,19 @@ function TaskDetailPanelBody({ task, agents, open, onClose }: TaskDetailPanelPro
           border: "1px solid #f0f0f0", borderRadius: 6, padding: 8,
           background: "#fcfcfc",
         }}>
-          {messages.length === 0 ? (
+          {messagesLoading ? (
+            <div style={{ textAlign: "center", padding: 8 }}>
+              <Spin size="small" />
+            </div>
+          ) : messagesError ? (
+            <Alert
+              type="error"
+              showIcon
+              message="加载对话失败"
+              description={messagesError}
+              action={<Button size="small" onClick={loadMessages}>重试</Button>}
+            />
+          ) : messages.length === 0 ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {task.assigned_agent_id
                 ? "还没有对话记录。可以直接给 Agent 发消息。"

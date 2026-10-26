@@ -10,8 +10,9 @@
 // fully owned by us (kill on drop, port collision detection) rather than
 // spawned on demand by the frontend.
 
-use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::io::{BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -57,7 +58,7 @@ pub fn spawn() -> Result<Child, String> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn agent-proxy: {}", e))?;
+        .map_err(|e| spawn_error_message(&node, &e))?;
 
     if let Some(stdout) = child.stdout.take() {
         thread::spawn(move || pipe_to_stderr("agent-proxy/stdout", stdout));
@@ -226,11 +227,82 @@ fn put_in_own_process_group(_cmd: &mut Command) {
 // macOS 没有 PDEATHSIG，Windows 上又不宜为它引入 windows-sys 依赖，
 // 所以这个监护放在 Node 侧，一次实现覆盖 Unix 全家。
 
-fn pipe_to_stderr(prefix: &str, stream: impl Read + Send + 'static) {
-    let reader = BufReader::new(stream);
-    for line in reader.lines().map_while(Result::ok) {
-        eprintln!("[{}] {}", prefix, line);
+/// 每条流（stdout / stderr）最多转发这么多字节到 Tauri 的 stderr。
+///
+/// W-03：原先 `pipe_to_stderr` 用 `lines()` 无限转发，agent-proxy 或它拉起的
+/// CLI 一旦刷屏（死循环日志、超长报错）就会把整个输出塞进进程内存。
+/// 现在**有上限**，且超限后**继续把管道读空**（背压）：只丢弃不转发，
+/// 否则子进程会写满管道后阻塞，表现为「Agent 卡死」。
+pub const MAX_FORWARDED_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForwardStats {
+    /// 真正交给 sink 的字节数（<= limit）
+    forwarded: u64,
+    /// 从流里读出的总字节数（含被丢弃的）
+    total: u64,
+    /// 是否发生了截断
+    truncated: bool,
+}
+
+/// 把 `stream` 读空，最多把 `limit` 字节交给 `sink`。
+///
+/// 按固定 8KB 块读，**不按行**：单行 100MB 的日志用 `read_until` 同样会撑爆内存。
+/// 超限后仍然继续读（背压），只是不再交给 sink。
+fn forward_stream(
+    stream: impl Read,
+    limit: usize,
+    mut sink: impl FnMut(&[u8]),
+) -> ForwardStats {
+    let mut reader = BufReader::new(stream);
+    let mut buf = [0u8; 8192];
+    let mut stats = ForwardStats {
+        forwarded: 0,
+        total: 0,
+        truncated: false,
+    };
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                stats.total += n as u64;
+                if !stats.truncated {
+                    let remaining = limit.saturating_sub(stats.forwarded as usize);
+                    let take = n.min(remaining);
+                    if take > 0 {
+                        sink(&buf[..take]);
+                        stats.forwarded += take as u64;
+                    }
+                    if take < n {
+                        stats.truncated = true;
+                    }
+                }
+            }
+            Err(_) => break, // 子进程退出/管道断了：没有更多可读的
+        }
     }
+    stats
+}
+
+fn pipe_to_stderr(prefix: impl Into<String>, stream: impl Read + Send + 'static) {
+    let prefix = prefix.into();
+    thread::spawn(move || {
+        let stderr = std::io::stderr();
+        let mut out = stderr.lock();
+        let _ = write!(out, "[{}] ", prefix);
+        let stats = forward_stream(stream, MAX_FORWARDED_BYTES, |chunk| {
+            let _ = out.write_all(chunk);
+        });
+        if stats.truncated {
+            let _ = writeln!(
+                out,
+                "\n[{}] output truncated: forwarded {} of {} bytes (limit {} per stream)",
+                prefix, stats.forwarded, stats.total, MAX_FORWARDED_BYTES
+            );
+        } else {
+            let _ = out.flush();
+        }
+    });
 }
 
 fn is_port_in_use(port: u16) -> bool {
@@ -239,44 +311,98 @@ fn is_port_in_use(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
 }
 
-fn resolve_node() -> Option<PathBuf> {
-    // 1. `which node` — works if PATH includes the user's node install
-    //    (e.g. homebrew in /opt/homebrew/bin which is in default macOS PATH).
-    if let Ok(out) = Command::new("which").arg("node").output() {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
-        }
-    }
+/// 解析 `node` 可执行文件。行为是**显式**的（W-02）：
+///
+/// 1. 只在 `PATH` 的每个目录里找 `node`（Windows 额外认 `node.exe`）；
+///    `PATH` 缺失或为空 ⇒ 这一步**跳过**，不会去猜当前目录；
+/// 2. 扫常见安装位置（Homebrew / /usr/local / /usr/bin / ~/.local/bin）；
+/// 3. nvm 版本目录里挑版本号最大的；
+/// 4. 全都没命中 ⇒ 返回裸 `"node"`，让 `Command::spawn` 给出 ENOENT，
+///    错误信息里明确写「PATH 与常见安装位置都没找到」。
+///
+/// ⚠ 第 4 步保证本函数**永远 `Some`** —— 调用方别指望用它判断 node 在不在。
+///   这是「启动失败时错误可行动」与「不要静默假装成功」的取舍：
+///   真正的失败点在 `spawn`，那里会把原因翻译成人话。
+pub fn resolve_node() -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    resolve_node_in(path_env.as_deref(), &home, &common_node_candidates(&home))
+}
 
-    // 2. Scan common install locations. macOS .app processes inherit a
-    //    minimal PATH that usually excludes nvm-managed bins, so we
-    //    look in the obvious spots directly.
-    let home = std::env::var("HOME").unwrap_or_default();
-    // 只有 `bin/node` 这种**文件**才算命中，所以这里列的都是可执行文件路径。
-    // （原先数组里有一项 `~/.nvm/versions/node` —— 那是目录，`is_file()` 恒为 false，
-    //  永远选不中；另有两个空 PathBuf 靠 `is_empty()` 跳过。已清掉，行为不变。）
-    let candidates: [PathBuf; 5] = [
+fn common_node_candidates(home: &Path) -> Vec<PathBuf> {
+    vec![
         PathBuf::from("/opt/homebrew/bin/node"),
         PathBuf::from("/usr/local/bin/node"),
         PathBuf::from("/usr/bin/node"),
         PathBuf::from("/bin/node"),
-        PathBuf::from(home.clone() + "/.local/bin/node"),
-    ];
-    for c in candidates.iter() {
-        if c.as_os_str().is_empty() {
+        home.join(".local/bin/node"),
+    ]
+}
+
+fn node_binary_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &["node.exe", "node"]
+    }
+    #[cfg(not(windows))]
+    {
+        &["node"]
+    }
+}
+
+/// 在 `PATH` 里按顺序找第一个 `node` 文件。
+/// 空字符串 / 空路径段一律跳过（POSIX 里空段等于当前目录，行为不确定）。
+fn find_node_on_path(path_env: Option<&OsStr>) -> Option<PathBuf> {
+    let raw = path_env?;
+    if raw.is_empty() {
+        return None;
+    }
+    for dir in std::env::split_paths(raw) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        if c.is_file() {
+        for name in node_binary_names() {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// `resolve_node` 的可测版本：PATH、HOME、常见候选目录都从参数进来。
+fn resolve_node_in(
+    path_env: Option<&OsStr>,
+    home: &Path,
+    common: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(p) = find_node_on_path(path_env) {
+        return Some(p);
+    }
+
+    for c in common {
+        if !c.as_os_str().is_empty() && c.is_file() {
             return Some(c.clone());
         }
     }
 
-    // 3. nvm version dir — pick the highest version
-    pick_highest_nvm_node(&PathBuf::from(home + "/.nvm/versions/node"))
+    pick_highest_nvm_node(&home.join(".nvm").join("versions").join("node"))
         .or_else(|| Some(PathBuf::from("node")))
+}
+
+/// spawn 失败时给用户/日志看的错误：如果是裸 `"node"` 兜底失败，
+/// 直接把「怎么修」写出来（装 Node 18+ / 修 PATH），不要只甩 os error。
+fn spawn_error_message(node: &Path, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound && node == Path::new("node") {
+        return format!(
+            "failed to spawn agent-proxy: node executable not found in PATH or common install \
+             locations ({e}); install Node.js 18+ or add its bin directory to PATH"
+        );
+    }
+    format!("failed to spawn agent-proxy: {e}")
 }
 
 /// nvm 版本目录名（`v20.11.0`）的数值化排序键。
@@ -388,6 +514,8 @@ fn resolve_entry() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -499,6 +627,229 @@ mod tests {
         assert!(
             p.is_some(),
             "末位兜底保证 Some；这不是 bug，但调用方别指望它是 None"
+        );
+    }
+
+    fn make_fake_node_in(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("建假 bin 目录");
+        let node = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+        std::fs::write(&node, b"#!/bin/sh\nexit 0\n").expect("写假 node");
+        node
+    }
+
+    /// W-02：`PATH` 里有 node ⇒ 用 PATH 里的那个（且按目录顺序取第一个）。
+    #[test]
+    fn node_is_found_on_path_in_directory_order() {
+        let t = TempTree::new("path-order");
+        let first = t.path.join("first");
+        let second = t.path.join("second");
+        let want = make_fake_node_in(&first);
+        make_fake_node_in(&second);
+
+        let joined = std::env::join_paths([&first, &second]).expect("拼 PATH");
+        let got = find_node_on_path(Some(joined.as_os_str()));
+        assert_eq!(got.as_deref(), Some(want.as_path()));
+    }
+
+    /// W-02：PATH 为空 / 缺失 ⇒ **不猜**当前目录，直接返回 None，
+    /// 交给后面的常见目录与 nvm 兜底。
+    #[test]
+    fn empty_or_missing_path_yields_no_path_hit() {
+        assert_eq!(
+            find_node_on_path(Some(OsStr::new(""))),
+            None,
+            "PATH 为空时不应命中任何东西（尤其不能拿当前目录当 PATH）"
+        );
+        assert_eq!(find_node_on_path(None), None, "PATH 缺失时同样不命中");
+        assert_eq!(
+            find_node_on_path(Some(OsStr::new("/definitely/not/here"))),
+            None
+        );
+    }
+
+    /// W-02：PATH 为空且常见目录里没有 node ⇒ 落到裸 `"node"`（由 spawn 报可行动的错）。
+    #[test]
+    fn resolve_with_empty_path_falls_back_to_bare_node() {
+        let t = TempTree::new("resolve-empty");
+        let got = resolve_node_in(Some(OsStr::new("")), &t.path, &[]);
+        assert_eq!(got, Some(PathBuf::from("node")));
+        let got = resolve_node_in(None, &t.path, &[]);
+        assert_eq!(got, Some(PathBuf::from("node")));
+    }
+
+    /// W-02：PATH 没命中时，常见安装位置仍然能救回来。
+    #[test]
+    fn resolve_falls_back_to_common_install_locations() {
+        let t = TempTree::new("resolve-common");
+        let bin = t.path.join("homebrew-bin");
+        let want = make_fake_node_in(&bin);
+        let got = resolve_node_in(
+            Some(OsStr::new("/definitely/not/here")),
+            &t.path,
+            std::slice::from_ref(&want),
+        );
+        assert_eq!(got.as_deref(), Some(want.as_path()));
+    }
+
+    /// W-02：裸兜底失败时，错误必须说明「装 Node 18+ / 修 PATH」。
+    #[test]
+    fn spawn_error_for_bare_node_is_actionable() {
+        let e = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+        let msg = spawn_error_message(Path::new("node"), &e);
+        assert!(msg.contains("PATH"), "错误应提到 PATH：{msg}");
+        assert!(msg.contains("Node.js 18+"), "错误应给出安装建议：{msg}");
+        // 明确的绝对路径失败时不要把「装 node」的话术硬套上去
+        let msg2 = spawn_error_message(Path::new("/opt/homebrew/bin/node"), &e);
+        assert!(!msg2.contains("Node.js 18+"));
+    }
+
+    /// W-03：输出超过上限 ⇒ 只转发上限以内，但**整条流仍被读空**（不阻塞子进程）。
+    #[test]
+    fn forward_stream_caps_output_and_still_drains() {
+        let total = 2 * 1024 * 1024; // > 1MB
+        let data = vec![b'x'; total];
+        let mut forwarded = Vec::new();
+        let stats = forward_stream(Cursor::new(data), MAX_FORWARDED_BYTES, |chunk| {
+            forwarded.extend_from_slice(chunk)
+        });
+        assert_eq!(stats.total, total as u64, "必须把整条流读完（背压）");
+        assert_eq!(stats.forwarded, MAX_FORWARDED_BYTES as u64);
+        assert_eq!(forwarded.len(), MAX_FORWARDED_BYTES);
+        assert!(stats.truncated);
+    }
+
+    /// W-03：单行超长（没有换行）也不能撑爆内存 —— 按块读，不按行读。
+    #[test]
+    fn forward_stream_handles_single_huge_line() {
+        let mut data = vec![b'y'; 1024 * 1024];
+        data.push(b'\n');
+        let stats = forward_stream(Cursor::new(data), 1024, |_| {});
+        assert_eq!(stats.total, 1024 * 1024 + 1);
+        assert_eq!(stats.forwarded, 1024);
+        assert!(stats.truncated);
+    }
+
+    #[test]
+    fn forward_stream_passes_small_output_through_untouched() {
+        let mut forwarded = Vec::new();
+        let stats = forward_stream(Cursor::new(b"hello\nworld\n"), 1024, |c| {
+            forwarded.extend_from_slice(c)
+        });
+        assert_eq!(stats.forwarded, 12);
+        assert_eq!(stats.total, 12);
+        assert!(!stats.truncated);
+        assert_eq!(forwarded, b"hello\nworld\n");
+    }
+
+    /// W-03 真进程版：子进程输出 1.5MB，转发有上限且函数返回（没有卡在管道上）。
+    #[cfg(unix)]
+    #[test]
+    fn forward_stream_from_real_child_caps_at_limit() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("head -c 1572864 /dev/zero")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("起刷屏子进程");
+        let stream = child.stdout.take().expect("stdout");
+        let stats = forward_stream(stream, MAX_FORWARDED_BYTES, |_| {});
+        let status = child.wait().expect("等子进程");
+        assert!(status.success());
+        assert_eq!(stats.total, 1_572_864);
+        assert_eq!(stats.forwarded, MAX_FORWARDED_BYTES as u64);
+        assert!(stats.truncated);
+    }
+
+    /// W-01：应用被 SIGKILL（`RunEvent::Exit` 不会触发）时，
+    /// agent-proxy 必须靠 ppid 看门狗自己退出，不能变成孤儿继续烧 token。
+    ///
+    /// 造法：测试进程起一个 `/bin/sh` 当「Tauri」，它 `nohup` 起真的
+    /// `agent-proxy/dist/index.js`；然后测试**只 SIGKILL 那个 sh**（不杀进程组），
+    /// 模拟「宿主编排层把应用强杀」。看门狗间隔用环境变量压到 300ms。
+    #[cfg(unix)]
+    #[test]
+    fn parent_sigkill_takes_down_proxy_via_ppid_watchdog() {
+        use std::net::TcpListener;
+
+        let node = resolve_node().expect("node");
+        let entry = match resolve_entry() {
+            Some(p) => p,
+            None => {
+                eprintln!("skipping: agent-proxy/dist/index.js not built");
+                return;
+            }
+        };
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|l| l.local_addr())
+            .expect("拿空闲端口")
+            .port();
+        let t = TempTree::new("parent-death");
+
+        let script = format!(
+            "AGENT_PROXY_PARENT_WATCH_MS=300 nohup \"{}\" \"{}\" --port {} --persist-dir \"{}\" \
+             >/dev/null 2>&1 & echo $!; wait",
+            node.display(),
+            entry.display(),
+            port,
+            t.path.display()
+        );
+        let mut shell = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("起模拟 Tauri 的 shell");
+
+        let mut line = String::new();
+        BufReader::new(shell.stdout.take().expect("stdout"))
+            .read_line(&mut line)
+            .expect("读 agent-proxy pid");
+        let proxy_pid: libc::pid_t = line.trim().parse().expect("pid 是数字");
+
+        let mut bound = false;
+        for _ in 0..200 {
+            if is_port_in_use(port) {
+                bound = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if !bound {
+            unsafe { libc::kill(proxy_pid, libc::SIGKILL) };
+            let _ = shell.wait();
+            panic!("agent-proxy 没有在 10s 内绑定端口 {port}");
+        }
+
+        // 「应用」异常退出：只杀 sh，不碰它拉起的 node（模拟宿主编排层 kill -9）
+        unsafe { libc::kill(shell.id() as libc::pid_t, libc::SIGKILL) };
+        let _ = shell.wait();
+
+        // 看门狗窗口内它应该还活着 —— 否则这条测的是「sh 退出顺手带走了 node」，
+        // 而不是 ppid 看门狗。
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            process_alive(proxy_pid),
+            "前置条件：父进程死后、看门狗触发前，agent-proxy 应当还活着"
+        );
+
+        let mut still_alive = true;
+        for _ in 0..120 {
+            thread::sleep(Duration::from_millis(50));
+            if !process_alive(proxy_pid) {
+                still_alive = false;
+                break;
+            }
+        }
+        if still_alive {
+            unsafe { libc::kill(proxy_pid, libc::SIGKILL) };
+        }
+        assert!(
+            !still_alive,
+            "父进程被 SIGKILL 后 agent-proxy 仍然活着 —— ppid 看门狗没有生效"
         );
     }
 

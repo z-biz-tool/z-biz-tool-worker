@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Card, Typography, Button, Space, Input, Tag, Empty, Modal, message, Divider } from "antd";
-import { PlusOutlined, DeleteOutlined, ArrowRightOutlined, SettingOutlined } from "@ant-design/icons";
+import { Card, Typography, Button, Space, Input, Modal, message, Alert } from "antd";
+import { PlusOutlined, DeleteOutlined, ArrowRightOutlined, ArrowLeftOutlined, SettingOutlined } from "@ant-design/icons";
 
 const { Text } = Typography;
 
@@ -54,8 +54,12 @@ export default function WorkflowEditor({ onSave }: WorkflowEditorProps) {
 
   const handleDelete = (index: number) => {
     Modal.confirm({
-      title: `删除状态「${statuses[index].label}」?`,
-      content: "删除后使用该状态的任务将变为「待处理」",
+      title: `删除状态「${statuses[index].label}」？`,
+      content: "使用该状态的任务会变为「待处理」，删除后无法恢复。",
+      okText: "删除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      autoFocusButton: "cancel",
       onOk: () => {
         setStatuses(statuses.filter((_, i) => i !== index));
         message.success("已删除");
@@ -95,8 +99,16 @@ export default function WorkflowEditor({ onSave }: WorkflowEditorProps) {
         </Space>
       </div>
 
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="自定义工作流尚未接入任务状态"
+        description="这里的改动只在本页预览，不会保存到数据库，也不会影响看板/列表的状态流转。"
+      />
+
       <Text type="secondary" style={{ marginBottom: 12, display: "block", fontSize: 12 }}>
-        拖拽调整状态顺序，任务状态将按此顺序流转
+        用每张卡片上的 ←/→ 按钮调整状态顺序（当前仅本页生效）
       </Text>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -114,8 +126,25 @@ export default function WorkflowEditor({ onSave }: WorkflowEditorProps) {
                 <Button
                   type="text"
                   size="small"
+                  icon={<ArrowLeftOutlined />}
+                  disabled={i === 0}
+                  aria-label={`将「${s.label}」左移`}
+                  onClick={(e) => { e.stopPropagation(); handleMove(i, i - 1); }}
+                />
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ArrowRightOutlined />}
+                  disabled={i === statuses.length - 1}
+                  aria-label={`将「${s.label}」右移`}
+                  onClick={(e) => { e.stopPropagation(); handleMove(i, i + 1); }}
+                />
+                <Button
+                  type="text"
+                  size="small"
                   danger
                   icon={<DeleteOutlined />}
+                  aria-label={`删除状态「${s.label}」`}
                   onClick={(e) => { e.stopPropagation(); handleDelete(i); }}
                 />
               </div>
@@ -146,6 +175,7 @@ export default function WorkflowEditor({ onSave }: WorkflowEditorProps) {
             <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: "block" }}>颜色</Text>
             <input
               type="color"
+              aria-label="状态颜色"
               value={editForm.color}
               onChange={(e) => setEditForm({ ...editForm, color: e.target.value })}
               style={{ width: 40, height: 32, border: "none", cursor: "pointer" }}

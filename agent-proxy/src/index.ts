@@ -58,7 +58,7 @@ async function main() {
   );
   const executor = new CliChatExecutor(wrapperRegistry);
 
-  const server = createServer({ agentRegistry, sessionRegistry, executor });
+  const server = createServer({ agentRegistry, sessionRegistry, executor, processRegistry: cliProcessRegistry });
 
   await new Promise<void>((resolve) => {
     server.listen(appConfig.port, appConfig.host, () => resolve());
@@ -105,7 +105,7 @@ async function main() {
         clearInterval(watchdog);
         shutdown('parent-death').catch(() => process.exit(1));
       }
-    }, 10_000);
+    }, appConfig.parentWatchMs);
     watchdog.unref();
   }
 }

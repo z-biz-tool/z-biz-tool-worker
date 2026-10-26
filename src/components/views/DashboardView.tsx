@@ -1,10 +1,16 @@
 import { useMemo } from "react";
-import { Card, Row, Col, Typography, Progress, Tag, Timeline, Space, Statistic } from "antd";
+import { Card, Row, Col, Typography, Progress, Tag, Timeline, Statistic, Alert, Button } from "antd";
 import {
-  ClockCircleOutlined, PlayCircleOutlined, PauseCircleOutlined,
-  EyeOutlined, CheckCircleOutlined, TeamOutlined, ProjectOutlined,
+  PlayCircleOutlined, TeamOutlined, ProjectOutlined,
 } from "@ant-design/icons";
 import type { Task, Agent, ProjectStats } from "../../types";
+import { useWorkerStore } from "../../stores/workerStore";
+import {
+  agentWorkload as buildAgentWorkload,
+  completedRate as calcCompletedRate,
+  recentTasks as pickRecentTasks,
+  statusDistribution,
+} from "../../utils/dashboardLayout";
 
 // 渐变色主题常量
 const brandGradient = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
@@ -27,30 +33,42 @@ interface DashboardViewProps {
 }
 
 export default function DashboardView({ tasks, agents, stats }: DashboardViewProps) {
-  const recentTasks = useMemo(
-    () => [...tasks].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 8),
-    [tasks]
-  );
+  const currentProjectId = useWorkerStore((s) => s.currentProjectId);
+  const selectProject = useWorkerStore((s) => s.selectProject);
 
-  const completedRate = stats && stats.tasks.total > 0
-    ? Math.round((stats.tasks.done / stats.tasks.total) * 100)
-    : 0;
+  const recentTasks = useMemo(() => pickRecentTasks(tasks, 8), [tasks]);
 
-  const agentWorkload = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const t of tasks) {
-      if (t.assigned_agent_id && (t.status === "doing" || t.status === "waiting")) {
-        map.set(t.assigned_agent_id, (map.get(t.assigned_agent_id) || 0) + 1);
-      }
-    }
-    return agents.map((a) => ({
-      agent: a,
-      count: map.get(a.id) || 0,
-    }));
-  }, [tasks, agents]);
+  // stats 为 null 时返回 null，界面显示「—」；不能把加载失败画成 0%/0 个任务
+  const completedRate = calcCompletedRate(stats);
+  const agentWorkload = useMemo(() => buildAgentWorkload(tasks, agents), [tasks, agents]);
+  const distribution = useMemo(() => statusDistribution(stats), [stats]);
+  const statusLabels: Record<string, string> = {
+    todo: "待处理",
+    doing: "进行中",
+    waiting: "等待中",
+    review: "待验收",
+    done: "已完成",
+  };
 
   return (
     <div style={{ padding: "0 4px" }}>
+      {!stats && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="统计数据暂不可用"
+          description="没有读到项目统计，下方数字以「—」显示。任务列表本身不受影响。"
+          action={
+            <Button
+              size="small"
+              onClick={() => currentProjectId && void selectProject(currentProjectId)}
+            >
+              重试
+            </Button>
+          }
+        />
+      )}
       {/* 统计卡片 */}
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col span={6}>
@@ -67,7 +85,7 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
               title={
                 <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>总任务</span>
               }
-              value={stats?.tasks.total || 0}
+              value={stats ? stats.tasks.total : "—"}
               prefix={<ProjectOutlined style={{ color: brandGradient }} />}
               valueStyle={{ fontSize: 20, fontWeight: 600 }}
             />
@@ -87,7 +105,7 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
               title={
                 <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>进行中</span>
               }
-              value={stats?.tasks.doing || 0}
+              value={stats ? stats.tasks.doing : "—"}
               valueStyle={{ color: "#1677ff", fontSize: 20, fontWeight: 600 }}
               prefix={<PlayCircleOutlined style={{ color: "#1677ff" }} />}
             />
@@ -107,7 +125,7 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
               title={
                 <span style={{ fontSize: 12, color: "var(--ant-color-text-secondary)" }}>Agent 数</span>
               }
-              value={stats?.agents.total || 0}
+              value={stats ? stats.agents.total : "—"}
               prefix={<TeamOutlined style={{ color: brandGradient }} />}
               valueStyle={{ fontSize: 20, fontWeight: 600 }}
             />
@@ -124,15 +142,19 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
             bodyStyle={{ padding: "12px" }}
           >
             <Text style={{ fontSize: 12, color: "var(--ant-color-text-secondary)", display: "block", marginBottom: 8 }}>完成率</Text>
-            <Progress
-              percent={completedRate}
-              size="small"
-              status={completedRate === 100 ? "success" : "active"}
-              strokeColor={{
-                '0%': '#667eea',
-                '100%': '#764ba2',
-              }}
-            />
+            {completedRate === null ? (
+              <Text type="secondary" style={{ fontSize: 20 }}>—</Text>
+            ) : (
+              <Progress
+                percent={completedRate}
+                size="small"
+                status={completedRate === 100 ? "success" : "active"}
+                strokeColor={{
+                  '0%': '#667eea',
+                  '100%': '#764ba2',
+                }}
+              />
+            )}
           </Card>
         </Col>
       </Row>
@@ -156,34 +178,25 @@ export default function DashboardView({ tasks, agents, stats }: DashboardViewPro
               background: cardBgGradient,
             }}
           >
-            {stats && (
+            {stats ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {(["todo", "doing", "waiting", "review", "done"] as const).map((s) => {
-                  const count = stats.tasks[s];
-                  const total = stats.tasks.total || 1;
-                  const labels: Record<string, string> = {
-                    todo: "待处理",
-                    doing: "进行中",
-                    waiting: "等待中",
-                    review: "待验收",
-                    done: "已完成",
-                  };
-                  return (
-                    <div key={s} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <Tag color={STATUS_COLORS[s]} style={{ minWidth: 56, textAlign: "center", margin: 0 }}>
-                        {labels[s]}
-                      </Tag>
-                      <Progress
-                        percent={Math.round((count / total) * 100)}
-                        size="small"
-                        style={{ flex: 1 }}
-                        strokeColor={STATUS_COLORS[s]}
-                        format={() => `${count}`}
-                      />
-                    </div>
-                  );
-                })}
+                {distribution.map(({ status, count, percent }) => (
+                  <div key={status} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <Tag color={STATUS_COLORS[status]} style={{ minWidth: 56, textAlign: "center", margin: 0 }}>
+                      {statusLabels[status]}
+                    </Tag>
+                    <Progress
+                      percent={percent}
+                      size="small"
+                      style={{ flex: 1 }}
+                      strokeColor={STATUS_COLORS[status]}
+                      format={() => `${count}`}
+                    />
+                  </div>
+                ))}
               </div>
+            ) : (
+              <Text type="secondary">统计暂不可用</Text>
             )}
           </Card>
         </Col>

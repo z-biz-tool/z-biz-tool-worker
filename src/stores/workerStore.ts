@@ -40,7 +40,7 @@ interface WorkerState {
   discoverLocalAgents: () => Promise<LocalAgentInfo[]>;
   importLocalAgent: (cli: LocalAgentInfo) => Promise<boolean>;
 
-  createTask: (projectId: string, title: string, desc: string, parentId?: string) => Promise<boolean>;
+  createTask: (projectId: string, title: string, desc: string, parentId?: string, status?: string) => Promise<boolean>;
   deleteTask: (id: string) => Promise<boolean>;
   assignTask: (taskId: string, agentId: string) => Promise<boolean>;
   retryTask: (taskId: string) => Promise<boolean>;
@@ -304,13 +304,14 @@ export const useWorkerStore = create<WorkerState>()(
           return true;
         },
 
-        createTask: async (projectId, title, desc, parentId) => {
+        createTask: async (projectId, title, desc, parentId, status) => {
           try {
             await invoke("create_task", {
               projectId,
               title,
               desc,
               parentId: parentId || null,
+              status: status || null,
             });
             await get().selectProject(projectId, { silent: true });
             succeed();

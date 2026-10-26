@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { Table, Tag, Button, Space, Select, Modal, Input, message, Dropdown, Typography } from "antd";
-import { PlusOutlined, DeleteOutlined, UserOutlined } from "@ant-design/icons";
+import { Table, Tag, Button, Space, Select, Modal, Input, message, Typography } from "antd";
+import { PlusOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { Task, Agent } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
 import { useDraft } from "../../hooks/useDraft";
+import { shouldOpenTaskFromRowClick, summarizeBatchUpdate } from "../../utils/listView";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -50,11 +51,29 @@ export default function ListView({ tasks, agents, onTaskClick }: ListViewProps) 
   const handleBatchStatusChange = async (status: string) => {
     const ids = [...selectedRowKeys] as string[];
     const results = await Promise.all(ids.map((id) => store.updateTaskStatus(id, status)));
-    const done = results.filter(Boolean).length;
+    const summary = summarizeBatchUpdate(results);
     setSelectedRowKeys([]);
-    if (done === 0) return;
-    if (done === ids.length) message.success(`已批量更新 ${done} 个任务`);
-    else message.warning(`已更新 ${done} 个任务，${ids.length - done} 个失败`);
+    if (!summary) return;
+    // 旧实现 done === 0 时直接 return：全失败也一声不吭，用户以为改完了。
+    if (summary.tone === "success") message.success(summary.message);
+    else if (summary.tone === "warning") message.warning(summary.message);
+    else message.error(summary.message);
+  };
+
+  const confirmDeleteTask = (record: Task) => {
+    Modal.confirm({
+      title: `删除任务「${record.title}」？`,
+      content: "该任务的对话、依赖与附件记录会一并删除，无法恢复。",
+      okText: "删除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      autoFocusButton: "cancel",
+      onOk: async () => {
+        const ok = await store.deleteTask(record.id);
+        if (!ok) throw new Error("delete failed"); // 失败时保持弹窗，错误已由 store 提示
+        message.success("任务已删除");
+      },
+    });
   };
 
   const columns: ColumnsType<Task> = [
@@ -120,24 +139,17 @@ export default function ListView({ tasks, agents, onTaskClick }: ListViewProps) 
       key: "actions",
       width: 80,
       render: (_, record) => (
-        <Dropdown
-          menu={{
-            items: [
-              { key: "del", label: "删除", icon: <DeleteOutlined />, danger: true },
-            ],
-            onClick: ({ key }) => {
-              if (key === "del") {
-                Modal.confirm({
-                  title: `删除任务 "${record.title}"?`,
-                  onOk: () => store.deleteTask(record.id),
-                });
-              }
-            },
+        <Button
+          type="text"
+          size="small"
+          danger
+          icon={<DeleteOutlined />}
+          aria-label={`删除任务「${record.title}」`}
+          onClick={(e) => {
+            e.stopPropagation();
+            confirmDeleteTask(record);
           }}
-          trigger={["click"]}
-        >
-          <Button type="text" size="small" icon={<DeleteOutlined />} />
-        </Dropdown>
+        />
       ),
     },
   ];
@@ -174,7 +186,15 @@ export default function ListView({ tasks, agents, onTaskClick }: ListViewProps) 
         rowKey="id"
         size="small"
         pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
-        onRow={(record) => ({ onClick: () => onTaskClick(record), style: { cursor: "pointer" } })}
+        onRow={(record) => ({
+          onClick: (e) => {
+            // 点删除/勾选框/展开按钮时不要再顺带打开详情
+            if (shouldOpenTaskFromRowClick(e.target as unknown as { closest?: (s: string) => unknown })) {
+              onTaskClick(record);
+            }
+          },
+          style: { cursor: "pointer" },
+        })}
       />
 
       <Modal title="新建任务" open={newTaskOpen} onOk={handleCreateTask} onCancel={() => setNewTaskOpen(false)}>

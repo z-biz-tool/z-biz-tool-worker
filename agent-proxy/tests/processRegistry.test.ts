@@ -10,7 +10,7 @@ import {
   CliProcessRegistry,
   parentProcessDied,
 } from '../src/processRegistry';
-import { parseIdleMs, DEFAULT_SESSION_IDLE_MS } from '../src/config';
+import { parseIdleMs, parseParentWatchMs, DEFAULT_SESSION_IDLE_MS, DEFAULT_PARENT_WATCH_MS } from '../src/config';
 
 /** 假 CLI 子进程：kill() 只记录收到的信号，不发真信号。 */
 class FakeProc extends EventEmitter {
@@ -64,6 +64,16 @@ test('parentProcessDied: ppid 变化即父亡', () => {
   assert.equal(parentProcessDied(100, 100), false);
   assert.equal(parentProcessDied(100, 1), true);
   assert.equal(parentProcessDied(100, 0), true);
+});
+
+test('parseParentWatchMs: 默认 10s，非法值回落，最短 100ms', () => {
+  assert.equal(parseParentWatchMs(undefined), DEFAULT_PARENT_WATCH_MS);
+  assert.equal(parseParentWatchMs(''), DEFAULT_PARENT_WATCH_MS);
+  assert.equal(parseParentWatchMs('abc'), DEFAULT_PARENT_WATCH_MS);
+  assert.equal(parseParentWatchMs('0'), DEFAULT_PARENT_WATCH_MS);
+  assert.equal(parseParentWatchMs('-1'), DEFAULT_PARENT_WATCH_MS);
+  assert.equal(parseParentWatchMs('300'), 300);
+  assert.equal(parseParentWatchMs('10.9'), 100, '太小的值抬到 100ms，避免忙轮询');
 });
 
 // ──────────── 登记表 ────────────
@@ -187,4 +197,30 @@ test('allStatuses 汇总所有被跟踪会话', () => {
   const all = reg.allStatuses();
   assert.equal(all.s1.status, 'active');
   assert.equal(all.s2.status, 'active');
+});
+
+// ──────────── 显式关闭会话（Agent 被删除，W-01） ────────────
+
+test('closeSession: 杀 CLI、标 ended、触发释放钩子', async () => {
+  const reg = new CliProcessRegistry({ idleMs: 1000, killGraceMs: 50 });
+  const p = new FakeProc(1009);
+  reg.register('s1', 'hermes', p.asChild());
+  const released: string[] = [];
+  reg.onRelease((id) => released.push(id));
+
+  const killed = await reg.closeSession('s1');
+
+  assert.equal(killed, 1);
+  assert.deepEqual(p.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(reg.getStatus('s1'), 'ended');
+  assert.deepEqual(released, ['s1']);
+  // 被我们关掉的 close 不该再报「意外死亡」
+  p.simulateExit(null, 'SIGKILL');
+  assert.equal(reg.getStatus('s1'), 'ended');
+});
+
+test('closeSession: 没有 CLI 的会话也能正常关（Agent 只有会话绑定）', async () => {
+  const reg = new CliProcessRegistry({ idleMs: 1000 });
+  assert.equal(await reg.closeSession('never-started'), 0);
+  assert.equal(reg.getStatus('never-started'), 'ended');
 });

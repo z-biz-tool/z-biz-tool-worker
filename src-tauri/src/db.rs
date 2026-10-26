@@ -6,6 +6,23 @@ use std::sync::Mutex;
 const DB_NAME: &str = "data.db";
 const DATA_DIR_NAME: &str = ".z-biz-tool-worker";
 
+/// 把文件/目录权限收窄到指定 mode（仅 Unix 生效）。
+/// 失败静默：权限加固是纵深防御，不能因此让应用起不来。
+#[cfg(unix)]
+fn restrict_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o777 != mode {
+            perms.set_mode(mode);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_mode(_path: &std::path::Path, _mode: u32) {}
+
 pub struct Database {
     pub conn: Mutex<Connection>,
 }
@@ -15,9 +32,17 @@ impl Database {
         let db_path = Self::db_path();
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
+            // 数据目录只给当前用户。库里的 agents.system_prompt 是**明文**
+            // （见 db.rs 里 system_prompt TEXT DEFAULT ''），同机其他用户
+            // 不该有读的机会。
+            restrict_mode(parent, 0o700);
         }
         let conn = Connection::open(&db_path)?;
+        restrict_mode(&db_path, 0o600);
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // WAL/SHM 是主库的明文副本，同样收口。文件是懒创建的，尽力而为。
+        restrict_mode(&db_path.with_extension("db-wal"), 0o600);
+        restrict_mode(&db_path.with_extension("db-shm"), 0o600);
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -1450,5 +1475,78 @@ mod tests {
             Some("已有的产出"),
             "释放不该清掉产出"
         );
+    }
+
+    // ===== W-23/W-24：落盘机密性与文件权限（结论落成测试）=====
+
+    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("z-biz-{}-{}-{}", tag, std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_mode_makes_files_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp_dir("perm");
+        let file = dir.join("data.db");
+        std::fs::write(&file, b"x").unwrap();
+
+        restrict_mode(&dir, 0o700);
+        restrict_mode(&file, 0o600);
+
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        // 不存在的路径（如尚未创建的 -wal/-shm）不能 panic
+        restrict_mode(&dir.join("missing"), 0o600);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W-23 结论：`agents.system_prompt` 是**明文**存进 SQLite 的，
+    /// 没有加密、没有脱敏。机主之外的人只要能读到 data.db 就能读到它。
+    /// 本测试直接从磁盘文件里找机密字符串，防止有人「以为加了密」。
+    #[test]
+    fn system_prompt_is_stored_in_plaintext_on_disk() {
+        let dir = unique_tmp_dir("plain");
+        let path = dir.join("data.db");
+        let db = {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            let db = Database {
+                conn: Mutex::new(conn),
+            };
+            db.init_schema().unwrap();
+            db
+        };
+        insert_project(&db, "p1", "项目");
+        let secret = "TOP-SECRET-SYSTEM-PROMPT-7f3a9c";
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, project_id, name, system_prompt, model, status, created_at, last_used_at)
+                 VALUES ('a1', 'p1', 'A', ?1, 'default', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![secret],
+            )
+            .unwrap();
+        }
+        drop(db);
+
+        let bytes = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains(secret),
+            "W-23：system_prompt 若已加密，磁盘上不应出现明文；此断言失败说明加密已加，需更新结论"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

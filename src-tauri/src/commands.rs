@@ -2,6 +2,7 @@ use crate::models::*;
 use crate::storage;
 use crate::task_state;
 use chrono::Utc;
+use tauri::Manager;
 
 /// 代理地址（**单一真源**）。
 ///
@@ -187,9 +188,21 @@ pub fn import_local_agent(
     Ok(agent)
 }
 
+/// 删除 Agent，并**回收它拉起的 CLI 进程**（W-01）。
+///
+/// 顺序：先摘会话映射（拿到 proxy session id），再删库，最后尽力通知代理
+/// 关会话。代理没起 / 旧版本不支持该端点时只记日志、不假装成功：
+/// 进程仍有空闲超时兜底，但这里绝不谎报「已杀掉」。
 #[tauri::command]
-pub fn delete_agent(id: String) -> Result<(), String> {
+pub async fn delete_agent(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<crate::agent_session::AgentSessionState>();
+    let session_id = state.forget(&id);
     storage::remove_agent(&id);
+    if let Some(sid) = session_id {
+        if let Err(e) = crate::agent_session::close_proxy_session(&sid).await {
+            eprintln!("[delete_agent] 关闭代理会话 {sid} 失败：{e}");
+        }
+    }
     Ok(())
 }
 
@@ -234,15 +247,21 @@ pub fn create_task(
     title: String,
     desc: String,
     parent_id: Option<String>,
+    status: Option<String>,
 ) -> Task {
     let now = Utc::now().to_rfc3339();
+    // 看板可以在任意列点 + 新建。旧实现固定 todo，前端记了目标列却没人用。
+    // 只接受合法状态；非法值退回 todo，不让脏状态进库。
+    let status = status
+        .filter(|s| task_state::validate_status(s).is_ok())
+        .unwrap_or_else(|| "todo".to_string());
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
         project_id,
         parent_id,
         title,
         description: desc,
-        status: "todo".to_string(),
+        status,
         priority: 0,
         start_date: None,
         due_date: None,
@@ -851,8 +870,13 @@ pub fn update_task(task_id: String, params: UpdateTaskParams) -> Result<Task, St
     if let Some(milestone) = params.milestone {
         task.milestone = milestone;
     }
+    // 双层 Option 才能区分「没传」与「传了 null」：null 是显式解除分配。
     if let Some(agent_id) = params.assigned_agent_id {
-        task.assigned_agent_id = Some(agent_id);
+        task.assigned_agent_id = agent_id;
+        if task.assigned_agent_id.is_none() {
+            // 名字是冗余展示列，必须一起清；否则卡片继续显示已删/已解绑的 Agent。
+            task.assigned_agent_name = None;
+        }
     }
     if let Some(tags) = params.tags {
         task.tags = tags;

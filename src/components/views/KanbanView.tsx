@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
-  DragEndEvent, DragOverlay, DragStartEvent,
+  DragEndEvent, DragOverlay, DragStartEvent, useDroppable,
 } from "@dnd-kit/core";
 import {
   SortableContext, verticalListSortingStrategy, useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Card, Button, Tag, Avatar, Badge, Input, Modal, message, Typography, Space } from "antd";
+import { Card, Button, Tag, Avatar, Badge, Input, Modal, message, Typography, Space, Alert } from "antd";
 import {
   PlusOutlined, ClockCircleOutlined, PlayCircleOutlined, PauseCircleOutlined,
   EyeOutlined, CheckCircleOutlined, HolderOutlined,
@@ -15,6 +15,10 @@ import {
 import type { Task, Agent } from "../../types";
 import { useWorkerStore } from "../../stores/workerStore";
 import { useDraft } from "../../hooks/useDraft";
+import {
+  KANBAN_STATUSES, countUngroupedTasks, groupTasksByStatus, resolveDropStatus,
+  type KanbanStatus,
+} from "../../utils/kanbanLayout";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -156,6 +160,78 @@ function DragOverlayCard({ task, agents }: { task: Task; agents: Agent[] }) {
   );
 }
 
+// 一列 = 一个 drop 目标。原先只有卡片是 sortable、列容器没有 useDroppable，
+// 于是「把任务拖到空列」根本没有可落点，用户看到的是拖过去没反应。
+function KanbanColumn({
+  status, list, agents, onTaskClick, onCreate,
+}: {
+  status: KanbanStatus;
+  list: Task[];
+  agents: Agent[];
+  onTaskClick: (t: Task) => void;
+  onCreate: (status: string) => void;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: status, data: { type: "column", status } });
+  const cfg = STATUS_CONFIG[status];
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        minWidth: 280,
+        maxWidth: 320,
+        flex: "1 0 280px",
+        background: isOver ? "#e6f4ff" : "#fafafa",
+        outline: isOver ? "1px dashed #1677ff" : undefined,
+        borderRadius: 8,
+        display: "flex",
+        flexDirection: "column",
+        maxHeight: "calc(100vh - 180px)",
+        transition: "background 0.15s ease",
+      }}
+    >
+      {/* 列头 */}
+      <div style={{
+        padding: "12px 12px 8px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        borderBottom: "1px solid #f0f0f0",
+      }}>
+        <Space size={8}>
+          <Tag color={cfg.color} icon={cfg.icon} style={{ margin: 0 }}>{cfg.label}</Tag>
+          <Badge count={list.length} showZero color="#d9d9d9" />
+        </Space>
+        <Button
+          type="text"
+          size="small"
+          icon={<PlusOutlined />}
+          aria-label={`在「${cfg.label}」列新建任务`}
+          onClick={() => onCreate(status)}
+        />
+      </div>
+
+      {/* 卡片列表 */}
+      <div style={{ flex: 1, overflow: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+        <SortableContext items={list.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+          {list.map((task) => (
+            <SortableTaskCard
+              key={task.id}
+              task={task}
+              agents={agents}
+              onTaskClick={onTaskClick}
+            />
+          ))}
+        </SortableContext>
+        {list.length === 0 && (
+          <div style={{ textAlign: "center", padding: "24px 0", color: "#bbb", fontSize: 12 }}>
+            暂无任务
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSignal }: KanbanViewProps) {
   const store = useWorkerStore();
   const [newTaskOpen, setNewTaskOpen] = useState(false);
@@ -169,13 +245,8 @@ export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSign
     setNewTaskOpen(true);
   }, [openNewTaskSignal]);
 
-  const orderedStatuses: Array<keyof typeof STATUS_CONFIG> = ["todo", "doing", "waiting", "review", "done"];
-
-  const tasksByStatus = useMemo(() => {
-    const m: Record<string, Task[]> = { todo: [], doing: [], waiting: [], review: [], done: [] };
-    for (const t of tasks) (m[t.status] ||= []).push(t);
-    return m;
-  }, [tasks]);
+  const tasksByStatus = useMemo(() => groupTasksByStatus(tasks), [tasks]);
+  const ungrouped = useMemo(() => countUngroupedTasks(tasks), [tasks]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -191,37 +262,32 @@ export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSign
     const { active, over } = event;
     setActiveTask(null);
 
-    if (!over) return;
+    const resolution = resolveDropStatus(
+      String(active.id),
+      over ? String(over.id) : null,
+      tasks,
+    );
+    if (!resolution) return;
 
-    const taskId = active.id as string;
-    const task = tasks.find((t) => t.id === taskId);
-    if (!task) return;
-
-    // 确定目标状态
-    let targetStatus: string | null = null;
-
-    // 如果拖到另一个任务上，获取该任务的状态
-    const overTask = tasks.find((t) => t.id === over.id);
-    if (overTask) {
-      targetStatus = overTask.status;
-    }
-
-    // 如果拖到列容器上(通过 over.id 是列名)
-    if (orderedStatuses.includes(over.id as string)) {
-      targetStatus = over.id as string;
-    }
-
-    if (targetStatus && targetStatus !== task.status) {
-      const ok = await store.updateTaskStatus(taskId, targetStatus);
-      if (ok) message.success(`任务已移动到「${STATUS_CONFIG[targetStatus]?.label}」`);
+    const ok = await store.updateTaskStatus(resolution.taskId, resolution.toStatus);
+    if (ok) {
+      message.success(`任务已移动到「${STATUS_CONFIG[resolution.toStatus]?.label}」`);
     }
   };
 
   const handleCreateTask = async () => {
     if (!newTaskForm.title.trim()) return message.warning("请输入任务标题");
     const currentProject = store.projects.find((p) => p.id === store.currentProjectId);
-    if (!currentProject) return;
-    const ok = await store.createTask(currentProject.id, newTaskForm.title.trim(), newTaskForm.desc);
+    if (!currentProject) return message.warning("请先选择项目");
+    // 把用户点 + 时所在列一起传下去：旧实现只把状态存进 state，创建时又丢掉，
+    // 于是在「进行中」列新建的任务会跑到「待处理」。
+    const ok = await store.createTask(
+      currentProject.id,
+      newTaskForm.title.trim(),
+      newTaskForm.desc,
+      undefined,
+      newTaskStatus,
+    );
     if (!ok) return;
     message.success("任务已创建");
     setNewTaskOpen(false);
@@ -240,60 +306,26 @@ export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSign
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
     >
+      {ungrouped > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`有 ${ungrouped} 个任务的状态不在看板五列内，未显示`}
+          description="请在列表视图把状态改为待处理/进行中/等待中/待验收/已完成之一。"
+        />
+      )}
       <div style={{ display: "flex", gap: 16, height: "100%", overflowX: "auto", padding: "0 4px" }}>
-        {orderedStatuses.map((status) => {
-          const list = tasksByStatus[status] || [];
-          const cfg = STATUS_CONFIG[status];
-          return (
-            <div
-              key={status}
-              style={{
-                minWidth: 280,
-                maxWidth: 320,
-                flex: "1 0 280px",
-                background: "#fafafa",
-                borderRadius: 8,
-                display: "flex",
-                flexDirection: "column",
-                maxHeight: "calc(100vh - 180px)",
-              }}
-            >
-              {/* 列头 */}
-              <div style={{
-                padding: "12px 12px 8px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                borderBottom: "1px solid #f0f0f0",
-              }}>
-                <Space size={8}>
-                  <Tag color={cfg.color} icon={cfg.icon} style={{ margin: 0 }}>{cfg.label}</Tag>
-                  <Badge count={list.length} showZero color="#d9d9d9" />
-                </Space>
-                <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => openNewTask(status)} />
-              </div>
-
-              {/* 卡片列表 */}
-              <div style={{ flex: 1, overflow: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-                <SortableContext items={list.map((t) => t.id)} strategy={verticalListSortingStrategy}>
-                  {list.map((task) => (
-                    <SortableTaskCard
-                      key={task.id}
-                      task={task}
-                      agents={agents}
-                      onTaskClick={onTaskClick}
-                    />
-                  ))}
-                </SortableContext>
-                {list.length === 0 && (
-                  <div style={{ textAlign: "center", padding: "24px 0", color: "#bbb", fontSize: 12 }}>
-                    暂无任务
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        {KANBAN_STATUSES.map((status) => (
+          <KanbanColumn
+            key={status}
+            status={status}
+            list={tasksByStatus[status]}
+            agents={agents}
+            onTaskClick={onTaskClick}
+            onCreate={openNewTask}
+          />
+        ))}
       </div>
 
       <DragOverlay>
@@ -301,11 +333,17 @@ export default function KanbanView({ tasks, agents, onTaskClick, openNewTaskSign
       </DragOverlay>
 
       {/* 新建任务弹窗 */}
-      <Modal title="新建任务" open={newTaskOpen} onOk={handleCreateTask} onCancel={() => setNewTaskOpen(false)}>
+      <Modal
+        title={`新建任务（${STATUS_CONFIG[newTaskStatus]?.label || "待处理"}）`}
+        open={newTaskOpen}
+        onOk={handleCreateTask}
+        onCancel={() => setNewTaskOpen(false)}
+      >
         <Input
           placeholder="任务标题"
           value={newTaskForm.title}
           onChange={(e) => setNewTaskForm({ ...newTaskForm, title: e.target.value })}
+          onPressEnter={handleCreateTask}
           style={{ marginBottom: 8 }}
         />
         <TextArea
