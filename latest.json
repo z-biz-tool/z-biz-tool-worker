@@ -1,0 +1,23 @@
+{
+  "version": "0.2.2",
+  "notes": "See the assets below to download this version.",
+  "pub_date": "2026-10-28T17:22:01Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-worker/releases/download/v0.2.2/z-biz-tool-worker_aarch64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK2R1eEczYnVMUzVrWDhlTGxPMHJRV3haQVkwQjYvOWVpcWlQYXRrcS9oVHZxbisrVG14VnpQclNGZlNLa2wrS3JYVzFCSXllYXBTUTBHRG9KMkN0c3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA3MTk0CWZpbGU6ei1iaXotdG9vbC13b3JrZXIuYXBwLnRhci5negprZUhoelZLcStQUTNsTEd4N3lWRktuK01Cc1JqSFB2N2UxSlJlTUNJeko3Z05rQ2NsQnE4K29DR2xIOURRNFV0RmpSZ094VjU1dGYwM2FJUGlKczRCQT09Cg=="
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-worker/releases/download/v0.2.2/z-biz-tool-worker_x64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK1duOU9kK2doa2NhRDIwRlpTZm1RSEV1eHNHT1JKQm5QK3NRQUp6QVd6M1B0d2t2SWFPRE1QN1dZY1Z2ZE1zYTdkdUhISE9IQkU3Q3gvVC96eHB4L1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA4MDg2CWZpbGU6ei1iaXotdG9vbC13b3JrZXIuYXBwLnRhci5nego5dUpLZkFDSTFVZkQwQ1M0TTU2TklCVWlwUTkzVERxUVlkTjNienBuaVQrMHNBY1pqMnFHVnJDWU5yTUZsMkFXQ2JtVTlQbEpzdVZYdnc1YkpMazRCdz09Cg=="
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-worker/releases/download/v0.2.2/z-biz-tool-worker_0.2.2_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK2VRSnNsbzExa0loZ29WZU9VbzcwMHFwWjI1Z21namlleEhhWUVWNFZPR3R3VVZUUEt6Ukl4bEpOdWdSYkVqbFZ6OCtqdEI2UGExdWMrbSs5Tk5GYXdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA3MzY2CWZpbGU6ei1iaXotdG9vbC13b3JrZXJfMC4yLjJfYW1kNjQuQXBwSW1hZ2UKN3NLbk9uRFF4UkR0OVMzR2hLZFJpYldubGt3RW5MMGJ6SjArWGs2bzhGdjQyUG5iaWR6SHZiUzI2Mi9KNDE5UEJDSk40ZUY5K3RaV2VmSUowMWJCQXc9PQo="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-worker/releases/download/v0.2.2/z-biz-tool-worker_0.2.2_x64_en-US.msi",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK1pBaUQ4RG1wZzlNdUZtb0lNeVlRVlkzU2sxWWNndElNaE0raFZRY3E4UzZLS09ETllaU05zL0Y0b0VMZm55Z0JjQ3prQXBDMzV1QkxMdERwL1J6aFFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA3Mzk3CWZpbGU6ei1iaXotdG9vbC13b3JrZXJfMC4yLjJfeDY0X2VuLVVTLm1zaQp2N1F3eHJZOEtVbkszakg0Z1R5a0UwUml3eWVwTUFGZE5abVhnY1FtWENxdUMveWk3ek02aW82dS9SQlhHTHB1djJlV0R3NGpxelYwTVVldmVYZC9DZz09Cg=="
+    }
+  }
+}
