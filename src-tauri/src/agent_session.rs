@@ -215,8 +215,12 @@ pub async fn chat(
     messages: Vec<ChatMessage>,
 ) -> Result<String, String> {
     let url = format!("{}/v1/chat/completions", proxy_url);
+    // no_proxy()：agent-proxy 是**本机**起的服务（proxy_url() 指向 127.0.0.1），
+    // 绝不该被 HTTP_PROXY 劫持。开着代理的机器上，请求会被送到代理去，
+    // 代理连不上本机就回 502 —— 表现是"agent 连不上"，实际是"代理挡在中间"。
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .no_proxy()
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
     let body = serde_json::json!({
@@ -367,6 +371,7 @@ pub async fn close_proxy_session(session_id: &str) -> Result<usize, String> {
     let url = format!("{}/v1/session/close", proxy_url());
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .no_proxy()
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
     let resp = client
@@ -460,7 +465,13 @@ mod tests {
     #[tokio::test]
     async fn worker_attaches_to_session_and_does_real_work() {
         // Probe the proxy.
-        let probe = reqwest::Client::new()
+        // no_proxy()：探的是本机 agent-proxy。走代理的话，探针会被送到代理去 ——
+        // 代理恰好能连上外网就回 200，于是"本机代理活着"被误判成"代理可达"，
+        // 后面真正的请求却又被代理挡下，两头对不上。
+        let probe = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap_or_default()
             .get("http://127.0.0.1:9099/health")
             .timeout(std::time::Duration::from_secs(1))
             .send()
