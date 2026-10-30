@@ -11,15 +11,18 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 深链队列：manage 给命令用、seed 给冷启动用，两处必须是同一份。
+    let zbiz_pending = cap_hub::receiver::SharedPending::default();
     let app = tauri::Builder::default()
         // 单实例（2026-10-26 分发底座）：第二次启动聚焦已有窗口，不再开新进程。
         // 必须作为第一个注册的插件（tauri-plugin-single-instance 官方要求）。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            cap_hub::receiver::handle_second_instance(app, &argv);
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -31,6 +34,7 @@ pub fn run() {
         .manage(agent_proxy::AgentProxyHandle(Mutex::new(None)))
         // Agent -> proxy session mapping. Survives across launches.
         .manage(agent_session::AgentSessionState::load())
+        .manage(zbiz_pending.clone())
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::create_project,
@@ -75,8 +79,11 @@ pub fn run() {
             //   那个洞的同款入口 ⇒ 留着就是留后门。
             //   对话走 `commands::send_task_message`（落库），
             //   自动执行走 `commands::run_task_background`（同样落库）。
+            zbiz_take_pending,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            // 冷启动时带进来的 zbiz:// 先入队，前端挂上监听后再取走。
+            cap_hub::receiver::seed_cold_start(app.handle(), &zbiz_pending);
             match agent_proxy::spawn() {
                 Ok(child) => {
                     let state = app.state::<agent_proxy::AgentProxyHandle>();
@@ -121,4 +128,12 @@ pub fn run() {
             }
         }
     });
+}
+
+/// 取走队列里的深链（家族统一命令名）。
+#[tauri::command]
+fn zbiz_take_pending(
+    pending: tauri::State<'_, cap_hub::receiver::SharedPending>,
+) -> Vec<cap_hub::Handoff> {
+    cap_hub::receiver::take_pending_from(pending.inner())
 }
