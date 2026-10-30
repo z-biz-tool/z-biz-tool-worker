@@ -570,7 +570,11 @@ mod tests {
         state.set_cli_type("agent-A", "hermes");
 
         let removed = state.forget("agent-A");
-        assert_eq!(removed.as_deref(), Some(sid.as_str()), "要返回会话 id 去关 CLI");
+        assert_eq!(
+            removed.as_deref(),
+            Some(sid.as_str()),
+            "要返回会话 id 去关 CLI"
+        );
         assert_eq!(state.cli_type_override("agent-A"), None);
         assert_eq!(state.forget("agent-A"), None, "重复删除不应报错");
 
@@ -586,10 +590,7 @@ mod tests {
     fn session_file_is_private_and_contains_no_prompts_or_secrets() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "agent-session-perm-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("agent-session-perm-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let path = dir.join("agent-sessions.json");
         let state = AgentSessionState::load_from(path.clone());

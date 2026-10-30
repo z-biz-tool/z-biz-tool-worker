@@ -56,9 +56,7 @@ pub fn spawn() -> Result<Child, String> {
         .stdin(Stdio::null());
     put_in_own_process_group(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| spawn_error_message(&node, &e))?;
+    let mut child = cmd.spawn().map_err(|e| spawn_error_message(&node, &e))?;
 
     if let Some(stdout) = child.stdout.take() {
         thread::spawn(move || pipe_to_stderr("agent-proxy/stdout", stdout));
@@ -249,11 +247,7 @@ struct ForwardStats {
 ///
 /// 按固定 8KB 块读，**不按行**：单行 100MB 的日志用 `read_until` 同样会撑爆内存。
 /// 超限后仍然继续读（背压），只是不再交给 sink。
-fn forward_stream(
-    stream: impl Read,
-    limit: usize,
-    mut sink: impl FnMut(&[u8]),
-) -> ForwardStats {
+fn forward_stream(stream: impl Read, limit: usize, mut sink: impl FnMut(&[u8])) -> ForwardStats {
     let mut reader = BufReader::new(stream);
     let mut buf = [0u8; 8192];
     let mut stats = ForwardStats {
@@ -374,11 +368,7 @@ fn find_node_on_path(path_env: Option<&OsStr>) -> Option<PathBuf> {
 }
 
 /// `resolve_node` 的可测版本：PATH、HOME、常见候选目录都从参数进来。
-fn resolve_node_in(
-    path_env: Option<&OsStr>,
-    home: &Path,
-    common: &[PathBuf],
-) -> Option<PathBuf> {
+fn resolve_node_in(path_env: Option<&OsStr>, home: &Path, common: &[PathBuf]) -> Option<PathBuf> {
     if let Some(p) = find_node_on_path(path_env) {
         return Some(p);
     }

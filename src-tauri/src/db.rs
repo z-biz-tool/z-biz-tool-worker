@@ -1484,7 +1484,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("z-biz-{}-{}-{}", tag, std::process::id(), nanos));
+        let dir =
+            std::env::temp_dir().join(format!("z-biz-{}-{}-{}", tag, std::process::id(), nanos));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1500,9 +1501,7 @@ mod tests {
         restrict_mode(&dir, 0o700);
         restrict_mode(&file, 0o600);
 
-        let mode = |p: &std::path::Path| {
-            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-        };
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&file), 0o600);
         // 不存在的路径（如尚未创建的 -wal/-shm）不能 panic
