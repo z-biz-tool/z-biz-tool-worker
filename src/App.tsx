@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Layout, Button, Modal, Input, Tag, Empty, Space, Typography, Dropdown,
   message, Avatar, Collapse, Card, Spin, Alert, Tooltip, Checkbox, Radio,
@@ -10,6 +10,9 @@ import {
   SwapOutlined,
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { startDeepLinkReceiver, ZBIZ_TAKE_PENDING, type Handoff } from "z-biz-tool-shared/protocol";
+import { resolveWorkerDeepLink, type WorkerView } from "./_shared/deepLink";
 import { useWorkerStore } from "./stores/workerStore";
 import { useViewStore, VIEW_ORDER } from "./stores/viewStore";
 import { filterTasks } from "./utils/taskFilters";
@@ -86,6 +89,37 @@ export default function App() {
   );
 
   // 启动：恢复上次打开的项目，失效则回落到第一个
+  //
+  // projectsLoaded / pendingDeepLink 是给下面深链接线用的：深链在冷启动时
+  // 就到了，而项目列表是这个 effect 里 `await loadProjects()` 之后才有。
+  // 不等的话，深链落地时 projects 还是空的，会被误报成「没有这个项目」。
+  const projectsLoadedRef = useRef(false);
+  const pendingDeepLinkRef = useRef<{ projectId: string | null; taskId: string | null } | null>(null);
+
+  // 把深链的「选项目 + 定位任务」真正落到界面上。
+  //
+  // 定位任务走 setSelectedTaskId 而不是 setSearchQuery：前者会打开任务详情抽屉
+  // （见下面的 selectedTask / TaskDetail），那才是「给我看这个任务」；
+  // 后者是搜索框，只是把列表过滤成标题匹配的一堆，反而把上下文打散了。
+  const landProjectDeepLink = useCallback(async (projectId: string, taskId: string | null) => {
+    const wstore = useWorkerStore.getState();
+    const proj = wstore.projects.find((p) => p.id === projectId);
+    if (!proj) {
+      message.error(`没有这个项目 ${projectId}`);
+      return;
+    }
+    await wstore.selectProject(projectId);
+    if (!taskId) return;
+
+    const task = useWorkerStore.getState().tasks.find((t) => t.id === taskId);
+    if (!task) {
+      message.warning(`项目 ${proj.name} 里没有这个任务 ${taskId}`);
+      return;
+    }
+    useViewStore.getState().setView("list");
+    setSelectedTaskId(task.id);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -100,12 +134,61 @@ export default function App() {
       } else if (currentProjectId) {
         clearProject();
       }
+      // 加载完成（成功与否）就放开深链落地，避免 pending 永远等不到列表
+      projectsLoadedRef.current = true;
+      const pending = pendingDeepLinkRef.current;
+      pendingDeepLinkRef.current = null;
+      if (pending?.projectId) void landProjectDeepLink(pending.projectId, pending.taskId);
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // zbiz:// 深链接收侧：**机制**在共享层 `startDeepLinkReceiver`（冷启动补取、事件监听、不静默吞掉），
+  // 本仓只通过 translate 注入**语义**（切视图 / 选项目 / 定位任务），并在 onEffect 落地到两个 store。
+  // 接不住（未知动作、未知视图、task 缺 project）必须给可见提示 —— 否则用户「点了没反应」。
+  useEffect(() => {
+    const stop = startDeepLinkReceiver({
+      productId: "worker",
+      invoke: () => invoke<Handoff[]>(ZBIZ_TAKE_PENDING),
+      listen: (event, handler) => listen(event, handler),
+      translate: (item) => {
+        const out = resolveWorkerDeepLink(item);
+        if (out.problem) {
+          return { ok: false, problem: out.problem };
+        }
+        return {
+          ok: true,
+          effect: { view: out.view, projectId: out.projectId, taskId: out.taskId },
+        };
+      },
+      onProblem: (msg, item) => {
+        // 未适配的深链静默吞掉 = 用户「点了没反应」，必须给可见提示
+        console.warn("[worker] 未适配的深链", item, msg);
+        message.warning(msg);
+      },
+      onEffect: (effect) => {
+        const view = effect.view as WorkerView | null;
+        const projectId = (effect.projectId as string | null) ?? null;
+        const taskId = (effect.taskId as string | null) ?? null;
+
+        if (view) useViewStore.getState().setView(view);
+
+        if (!projectId) return;
+
+        // 项目列表还没回来：先挂起，等上面那个启动 effect 收尾时再落地
+        if (!projectsLoadedRef.current) {
+          pendingDeepLinkRef.current = { projectId, taskId };
+          return;
+        }
+        void landProjectDeepLink(projectId, taskId);
+      },
+      log: (msg, item) => console.debug("[worker] 深链", msg, item),
+    });
+    return stop;
+  }, [landProjectDeepLink]);
 
   const hasInFlight = useMemo(
     () => tasks.some((t) => t.status === "doing" || t.status === "waiting"),

@@ -34,6 +34,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+// 深链收侧的 `zbiz_take_pending` 由共享层代调，字面量扫描看不见它 —— 判据放 testkit
+import { collectSharedConsumedCommands } from "z-biz-tool-shared/testkit";
 
 /**
  * 仓根 = 进程的工作目录。
@@ -273,6 +275,11 @@ function readCalled(): Set<string> {
     const src = stripJsComments(readFileSync(f, "utf-8"));
     for (const cmd of calledCommandsFrom(src)) set.add(cmd);
   }
+  // 深链收侧的 `zbiz_take_pending` 是**共享层**替本仓调的（见 App.tsx 的
+  // startDeepLinkReceiver），命令名写在 z-biz-tool-shared 里，上面的字面量扫描
+  // 看不见它。不补这一份的话，这条命令会被判成「后端注册了但没人调」，
+  // 要么误报要么被塞进预留清单 —— 判据放在 testkit 里，不写私有副本。
+  for (const cmd of collectSharedConsumedCommands(files)) set.add(cmd);
   return set;
 }
 
@@ -289,10 +296,6 @@ const RESERVED: Record<string, string> = {
     "看板多选批量改状态是**独立需求**，交互（多选框放哪、能不能跨列）要先定；本轮不动",
   list_agent_sessions:
     "会话总览是诊断视图；等有「Agent 会话面板」这个需求时，和它一起做",
-  zbiz_take_pending:
-    "zbiz:// 深链队列的前端消费口。协议与队列在 capability 仓的 cap-hub 里，" +
-    "本仓 Rust 侧已接，但界面的语义层（拿到深链后唤起哪个视图）尚未设计 —— " +
-    "aigen 是本轮试点，其余仓铺开时一并接界面并从本清单删除",
 };
 
 /* ────────────────────────── 门禁 ────────────────────────── */
