@@ -1,0 +1,15 @@
+{
+  "id": "worker",
+  "displayName": "AI 任务看板",
+  "description": "Agent 员工管理 / 任务分配 / 监控 / 验收",
+  "acceptsDeepLink": true,
+  "actions": [
+    "open"
+  ],
+  "keywords": [
+    "AI",
+    "任务",
+    "Agent",
+    "看板"
+  ]
+}
