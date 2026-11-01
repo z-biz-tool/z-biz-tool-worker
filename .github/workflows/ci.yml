@@ -110,6 +110,13 @@ jobs:
         working-directory: agent-proxy
         run: npm install
 
+      # 2026-11-01 新增：agent-proxy 有 test 脚本（20 条断言）但没有任何 workflow
+      # 调用它 —— 根仓的 npm test 只覆盖根 tests/，子包的测试在远端一次都没跑过
+      # （lead audit org 用例已点名）。放在父仓测试旁边，断言是秒级的。
+      - name: agent-proxy unit tests
+        working-directory: agent-proxy
+        run: npm test
+
       - name: Build frontend + agent-proxy (for Tauri context)
         run: |
           npm ci
