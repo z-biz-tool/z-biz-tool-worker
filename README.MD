@@ -1,5 +1,24 @@
 # z-biz-tool-worker
 
+> [!IMPORTANT]
+> **本仓已于 2026-11-07 废弃，能力已并入 [z-biz-tool-file](../z-biz-tool-file)。**
+>
+> AI 任务看板现在是 z-biz-tool-file 的活动栏板块「工作台」（`ProjectOutlined` 图标，
+> 排在「系统监控」之后）。所有能力都搬过去了，**只维护一份**：
+>
+> - **项目管理**：项目/Agent/任务 的组织与增删改、任务依赖、标签
+> - **多视图看板**：看板 / 列表 / 甘特 / 日历 / 仪表盘 / 文档
+> - **Agent 员工**：CLI 类型选择、本地 CLI 探测与导入、会话管理、消息记录
+> - **任务执行**：分配/重试/评审/状态流转、后台执行轮询、文档关联
+>
+> 独立 app 不再出包、不再单独发版。请直接用 z-biz-tool-file。
+>
+> 本仓保留为只读的历史存档。**不要再往这里提交功能代码** —— 要改任务看板能力，
+> 改 z-biz-tool-file 的 `src/apps/worker/` 与 `src-tauri/src/worker_app/`。
+
+---
+
+
 > AI 任务看板 — 项目管理 / Agent 员工管理 / 任务分配 / 执行监控 / 验收
 
 ![tech](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)

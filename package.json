@@ -3,6 +3,7 @@
   "version": "0.2.2",
   "license": "MIT",
   "description": "AI任务看板 - 项目管理/Agent员工管理/任务分配/执行监控/验收",
+  "deprecated": "本仓已于 2026-11-07 废弃，AI 任务看板能力已并入 z-biz-tool-file。功能改动请去 z-biz-tool-file 的 src/apps/worker/ 与 src-tauri/src/worker_app/。",
   "type": "module",
   "scripts": {
     "dev": "vite",
